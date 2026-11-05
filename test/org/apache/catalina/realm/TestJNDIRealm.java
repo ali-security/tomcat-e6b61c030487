@@ -20,11 +20,14 @@ import java.lang.reflect.Field;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.Principal;
+import java.util.Hashtable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import javax.naming.AuthenticationException;
 import javax.naming.NamingEnumeration;
 import javax.naming.NamingException;
+import javax.naming.directory.Attributes;
 import javax.naming.directory.BasicAttributes;
 import javax.naming.directory.DirContext;
 import javax.naming.directory.InitialDirContext;
@@ -40,6 +43,7 @@ import org.junit.Test;
 
 import org.apache.catalina.Context;
 import org.apache.catalina.LifecycleException;
+import org.apache.juli.logging.LogFactory;
 import org.apache.naming.NameParserImpl;
 import org.apache.tomcat.unittest.TesterContext;
 import org.apache.tomcat.util.buf.HexUtils;
@@ -52,6 +56,7 @@ public class TestJNDIRealm {
     private static final String USER = "test-user";
     private static final String PASSWORD = "test-password";
     private static final String REALM = "test-realm";
+    private static final String USER_DN = "cn=test-user,ou=people,dc=example,dc=com";
 
     private static final String NONCE = "test-nonce";
     // Not digested but doesn't matter for the purposes of the test
@@ -134,6 +139,60 @@ public class TestJNDIRealm {
     }
 
 
+    @Test
+    public void testBindAsUserAuthenticationDefault() throws Exception {
+        doTestBindAsUser(null);
+    }
+
+
+    @Test
+    public void testBindAsUserAuthenticationSimple() throws Exception {
+        doTestBindAsUser("simple");
+    }
+
+
+    @Test
+    public void testBindAsUserAuthenticationNone() throws Exception {
+        doTestBindAsUser("none");
+    }
+
+
+    @Test
+    public void testBindAsUserAuthenticationExternal() throws Exception {
+        doTestBindAsUser("EXTERNAL");
+    }
+
+
+    @Test
+    public void testBindAsUserAuthenticationGssapi() throws Exception {
+        doTestBindAsUser("GSSAPI");
+    }
+
+
+    /*
+     * Whatever authentication mechanism is configured for the realm's connection, the user provided credentials must
+     * be validated with a simple bind and the configured mechanism must be restored afterwards.
+     */
+    private void doTestBindAsUser(String configuredMechanism) throws Exception {
+        JNDIRealm realm = new JNDIRealm();
+        realm.containerLog = LogFactory.getLog(TestJNDIRealm.class);
+        JNDIRealm.User user = new JNDIRealm.User(USER, USER_DN, null, null, null);
+
+        BindRecordingDirContext context = new BindRecordingDirContext(configuredMechanism);
+        Hashtable<?,?> originalEnvironment = context.getEnvironment();
+
+        // Wrong password must be rejected
+        Assert.assertFalse(realm.bindAsUser(context, user, "wrong-password"));
+        Assert.assertEquals("simple", context.mechanismUsedForBind);
+        Assert.assertEquals(originalEnvironment, context.getEnvironment());
+
+        // Correct password must be accepted
+        Assert.assertTrue(realm.bindAsUser(context, user, PASSWORD));
+        Assert.assertEquals("simple", context.mechanismUsedForBind);
+        Assert.assertEquals(originalEnvironment, context.getEnvironment());
+    }
+
+
     private JNDIRealm buildRealm(String password) throws NamingException,
             NoSuchFieldException, IllegalAccessException, LifecycleException {
         Context context = new TesterContext();
@@ -196,5 +255,52 @@ public class TestJNDIRealm {
     private String digestA1() {
         String a1 = USER + ":" + REALM + ":" + PASSWORD;
         return HexUtils.toHexString(md5Helper.digest(a1.getBytes()));
+    }
+
+
+    /*
+     * Minimal directory context that simulates the LDAP bind performed by a directory operation. A simple bind (also
+     * the provider default when credentials are provided) checks the provided password. The other mechanisms ignore
+     * the provided password: "none" is an anonymous bind while "EXTERNAL" and "GSSAPI" authenticate using an identity
+     * established outside of the bind (e.g. TLS client certificate or Kerberos credentials).
+     */
+    private static class BindRecordingDirContext extends InitialDirContext {
+
+        private final Hashtable<Object,Object> environment = new Hashtable<>();
+        private String mechanismUsedForBind;
+
+        BindRecordingDirContext(String configuredMechanism) throws NamingException {
+            super(true);
+            if (configuredMechanism != null) {
+                environment.put(javax.naming.Context.SECURITY_AUTHENTICATION, configuredMechanism);
+            }
+        }
+
+        @Override
+        public Hashtable<?,?> getEnvironment() {
+            return (Hashtable<?,?>) environment.clone();
+        }
+
+        @Override
+        public Object addToEnvironment(String propName, Object propVal) {
+            return environment.put(propName, propVal);
+        }
+
+        @Override
+        public Object removeFromEnvironment(String propName) {
+            return environment.remove(propName);
+        }
+
+        @Override
+        public Attributes getAttributes(String name, String[] attrIds) throws NamingException {
+            mechanismUsedForBind = (String) environment.get(javax.naming.Context.SECURITY_AUTHENTICATION);
+            if (mechanismUsedForBind == null || "simple".equals(mechanismUsedForBind)) {
+                if (!USER_DN.equals(environment.get(javax.naming.Context.SECURITY_PRINCIPAL)) ||
+                        !PASSWORD.equals(environment.get(javax.naming.Context.SECURITY_CREDENTIALS))) {
+                    throw new AuthenticationException("Invalid credentials");
+                }
+            }
+            return new BasicAttributes();
+        }
     }
 }
