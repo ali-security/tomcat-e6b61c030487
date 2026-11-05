@@ -1376,6 +1376,8 @@ public final class OpenSSLEngine extends SSLEngine implements SSLUtil.ProtocolIn
                     MemorySegment singleResponse = OCSP_resp_get0(basicResponse, OCSP_resp_find(basicResponse, certId, -1));
                     return OCSP_single_get0_status(singleResponse, MemorySegment.NULL,
                             MemorySegment.NULL, MemorySegment.NULL, MemorySegment.NULL);
+                } else {
+                    X509_STORE_CTX_set_error(x509ctx, X509_V_ERR_UNABLE_TO_GET_CRL());
                 }
             }
         } catch (Exception e) {
