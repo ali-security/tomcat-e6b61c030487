@@ -196,6 +196,15 @@ public class openssl_h {
     public static int X509_V_OK() {
         return X509_V_OK;
     }
+    private static final int X509_V_ERR_UNABLE_TO_GET_CRL = (int)3L;
+    /**
+     * {@snippet lang=c :
+     * #define X509_V_ERR_UNABLE_TO_GET_CRL 3
+     * }
+     */
+    public static int X509_V_ERR_UNABLE_TO_GET_CRL() {
+        return X509_V_ERR_UNABLE_TO_GET_CRL;
+    }
     private static final int X509_V_ERR_CRL_HAS_EXPIRED = (int)12L;
     /**
      * {@snippet lang=c :
