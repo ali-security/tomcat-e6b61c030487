@@ -29,6 +29,8 @@ import org.apache.coyote.http11.Constants;
 import org.apache.coyote.http11.InputFilter;
 import org.apache.tomcat.util.buf.ByteChunk;
 import org.apache.tomcat.util.buf.HexUtils;
+import org.apache.tomcat.util.http.parser.ChunkExtension;
+import org.apache.tomcat.util.http.parser.ChunkExtension.State;
 import org.apache.tomcat.util.http.parser.HttpHeaderParser;
 import org.apache.tomcat.util.http.parser.HttpHeaderParser.HeaderDataSource;
 import org.apache.tomcat.util.http.parser.HttpHeaderParser.HeaderParseStatus;
@@ -108,7 +110,7 @@ public class ChunkedInputFilter implements InputFilter, ApplicationBufferHandler
     private volatile ParseState parseState = ParseState.CHUNK_HEADER;
     private volatile boolean crFound = false;
     private volatile int chunkSizeDigitsRead = 0;
-    private volatile boolean parsingExtension = false;
+    private volatile State extensionState = null;
     private volatile long extensionSize;
     private final HttpHeaderParser httpHeaderParser;
 
@@ -225,7 +227,7 @@ public class ChunkedInputFilter implements InputFilter, ApplicationBufferHandler
         parseState = ParseState.CHUNK_HEADER;
         crFound = false;
         chunkSizeDigitsRead = 0;
-        parsingExtension = false;
+        extensionState = null;
         extensionSize = 0;
         httpHeaderParser.recycle();
     }
@@ -330,19 +332,42 @@ public class ChunkedInputFilter implements InputFilter, ApplicationBufferHandler
             }
 
             byte chr = readChunk.get(readChunk.position());
-            if (chr == Constants.CR || chr == Constants.LF) {
-                parsingExtension = false;
+
+            if (extensionState != null) {
+                try {
+                    extensionState = ChunkExtension.parse(chr, extensionState);
+                } catch (IOException ioe) {
+                    throwBadRequestException(sm.getString("chunkedInputFilter.invalidHeader"));
+                }
+                if (extensionState == State.CR) {
+                    extensionState = null;
+                    if (!parseCRLF()) {
+                        return false;
+                    }
+                    eol = true;
+                } else {
+                    // Check the size
+                    extensionSize++;
+                    if (maxExtensionSize > -1 && extensionSize > maxExtensionSize) {
+                        throwBadRequestException(sm.getString("chunkedInputFilter.maxExtension"));
+                    }
+                }
+            } else if (chr == Constants.CR || chr == Constants.LF) {
                 if (!parseCRLF()) {
                     return false;
                 }
                 eol = true;
-            } else if (chr == Constants.SEMI_COLON && !parsingExtension) {
-                // First semi-colon marks the start of the extension. Further
-                // semi-colons may appear to separate multiple chunk-extensions.
-                // These need to be processed as part of parsing the extensions.
-                parsingExtension = true;
+            } else if (chr == Constants.SEMI_COLON) {
+                /*
+                 * First semicolon marks the start of the extension. ChunkExtension parser takes over for the
+                 * remainder of the extension.
+                 */
+                extensionState = State.PRE_NAME;
                 extensionSize++;
-            } else if (!parsingExtension) {
+                if (maxExtensionSize > -1 && extensionSize > maxExtensionSize) {
+                    throwBadRequestException(sm.getString("chunkedInputFilter.maxExtension"));
+                }
+            } else {
                 int charValue = HexUtils.getDec(chr);
                 if (charValue != -1 && chunkSizeDigitsRead < 8) {
                     chunkSizeDigitsRead++;
@@ -350,14 +375,6 @@ public class ChunkedInputFilter implements InputFilter, ApplicationBufferHandler
                 } else {
                     // Isn't valid hex so this is an error condition
                     throwBadRequestException(sm.getString("chunkedInputFilter.invalidHeader"));
-                }
-            } else {
-                // Extension 'parsing'
-                // Note that the chunk-extension is neither parsed nor
-                // validated. Currently it is simply ignored.
-                extensionSize++;
-                if (maxExtensionSize > -1 && extensionSize > maxExtensionSize) {
-                    throwBadRequestException(sm.getString("chunkedInputFilter.maxExtension"));
                 }
             }
 

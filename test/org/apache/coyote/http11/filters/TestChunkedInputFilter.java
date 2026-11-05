@@ -316,6 +316,106 @@ public class TestChunkedInputFilter extends TomcatBaseTest {
         }
     }
 
+
+    @Test
+    public void testExtension01() throws Exception {
+        doTestExtension("abc", true);
+    }
+
+
+    @Test
+    public void testExtension02() throws Exception {
+        doTestExtension("abc=def", true);
+    }
+
+
+    @Test
+    public void testExtension03() throws Exception {
+        doTestExtension(" a = b ", true);
+    }
+
+
+    @Test
+    public void testExtension04() throws Exception {
+        doTestExtension(" a = \"b\" ", true);
+    }
+
+
+    @Test
+    public void testExtension05() throws Exception {
+        doTestExtension("a=b=c", false);
+    }
+
+
+    @Test
+    public void testExtension06() throws Exception {
+        doTestExtension("a=b;", false);
+    }
+
+
+    @Test
+    public void testExtension07() throws Exception {
+        doTestExtension("a=\"aa\r\n\"", false);
+    }
+
+
+    @Test
+    public void testExtension08() throws Exception {
+        /*
+         * A CRLF sequence inside an otherwise valid chunk extension. A reverse proxy that permits this will view the
+         * CRLF as part of the quoted string whereas an unpatched Tomcat treats it as the end of the chunk header,
+         * enabling request smuggling. The remainder of this request is a valid chunked body so an unpatched Tomcat
+         * responds 200 to it.
+         */
+        doTestExtension("x=\"aa", false);
+    }
+
+
+    private void doTestExtension(String extension, boolean ok) throws Exception {
+        // Setup Tomcat instance
+        Tomcat tomcat = getTomcatInstance();
+
+        Assert.assertTrue(tomcat.getConnector().setProperty(
+                "maxExtensionSize", Integer.toString(EXT_SIZE_LIMIT)));
+
+        // No file system docBase required
+        Context ctx = tomcat.addContext("", null);
+
+        Tomcat.addServlet(ctx, "servlet", new EchoHeaderServlet(ok));
+        ctx.addServletMappingDecoded("/", "servlet");
+
+        tomcat.start();
+
+        String[] request = new String[] {
+            "POST /echo-params.jsp HTTP/1.1" + SimpleHttpClient.CRLF +
+            "Host: any" + SimpleHttpClient.CRLF +
+            "Transfer-encoding: chunked" + SimpleHttpClient.CRLF +
+            "Content-Type: application/x-www-form-urlencoded" +
+                    SimpleHttpClient.CRLF +
+            "Connection: close" + SimpleHttpClient.CRLF +
+            SimpleHttpClient.CRLF +
+            "3;" + extension + SimpleHttpClient.CRLF +
+            "a=0" + SimpleHttpClient.CRLF +
+            "4" + SimpleHttpClient.CRLF +
+            "&b=1" + SimpleHttpClient.CRLF +
+            "0" + SimpleHttpClient.CRLF +
+            SimpleHttpClient.CRLF };
+
+        TrailerClient client =
+                new TrailerClient(tomcat.getConnector().getLocalPort());
+        client.setRequest(request);
+
+        client.connect();
+        client.processRequest();
+
+        if (ok) {
+            Assert.assertTrue(client.getResponseLine(), client.isResponse200());
+        } else {
+            Assert.assertTrue(client.getResponseLine(), client.isResponse500());
+        }
+    }
+
+
     @Test
     public void testNoTrailingHeaders() throws Exception {
         // Setup Tomcat instance
