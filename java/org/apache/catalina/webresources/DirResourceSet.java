@@ -100,7 +100,7 @@ public class DirResourceSet extends AbstractFileResourceSet implements WebResour
         checkPath(path);
         String webAppMount = getWebAppMount();
         WebResourceRoot root = getRoot();
-        if (path.startsWith(webAppMount)) {
+        if (isPathMounted(path, webAppMount)) {
             /*
              * Lock the path for reading until the WebResource has been constructed. The lock prevents concurrent reads
              * and writes (e.g. HTTP GET and PUT / DELETE) for the same path causing corruption of the FileResource
@@ -132,7 +132,7 @@ public class DirResourceSet extends AbstractFileResourceSet implements WebResour
     public String[] list(String path) {
         checkPath(path);
         String webAppMount = getWebAppMount();
-        if (path.startsWith(webAppMount)) {
+        if (isPathMounted(path, webAppMount)) {
             File f = file(path.substring(webAppMount.length()), true);
             if (f == null) {
                 return EMPTY_STRING_ARRAY;
@@ -164,7 +164,7 @@ public class DirResourceSet extends AbstractFileResourceSet implements WebResour
         checkPath(path);
         String webAppMount = getWebAppMount();
         ResourceSet<String> result = new ResourceSet<>();
-        if (path.startsWith(webAppMount)) {
+        if (isPathMounted(path, webAppMount)) {
             File f = file(path.substring(webAppMount.length()), true);
             if (f != null) {
                 File[] list = f.listFiles();
@@ -238,7 +238,7 @@ public class DirResourceSet extends AbstractFileResourceSet implements WebResour
             return false;
         }
         String webAppMount = getWebAppMount();
-        if (path.startsWith(webAppMount)) {
+        if (isPathMounted(path, webAppMount)) {
             File f = file(path.substring(webAppMount.length()), false);
             if (f == null) {
                 return false;
@@ -268,7 +268,7 @@ public class DirResourceSet extends AbstractFileResourceSet implements WebResour
         }
 
         String webAppMount = getWebAppMount();
-        if (!path.startsWith(webAppMount)) {
+        if (!isPathMounted(path, webAppMount)) {
             return false;
         }
 

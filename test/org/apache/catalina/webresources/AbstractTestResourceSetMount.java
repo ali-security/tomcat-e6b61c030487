@@ -17,6 +17,7 @@
 package org.apache.catalina.webresources;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.InputStream;
 import java.util.Set;
 
@@ -66,6 +67,58 @@ public abstract class AbstractTestResourceSetMount
     public void testWriteAbove() {
         InputStream is = new ByteArrayInputStream("test".getBytes());
         Assert.assertFalse(resourceRoot.write("/", is, false));
+    }
+
+    /*
+     * The following tests use a path that starts with the web application mount point but that is not within it. For a
+     * resource set mounted at "/mount" that is a path such as "/mountd1". Such a path must not be treated as if it was
+     * within the mount point since that exposes resources - and bypasses any security constraints defined for the
+     * mount point - at a path where they should not be visible.
+     */
+
+    @Test
+    public final void testGetResourceOutsideMount() {
+        WebResource webResource = resourceRoot.getResource(getMount() + "d1/d1-f1.txt");
+        Assert.assertFalse(webResource.exists());
+        Assert.assertNull(webResource.getInputStream());
+    }
+
+    @Test
+    public final void testListOutsideMount() {
+        String[] results = resourceRoot.list(getMount() + "d1");
+
+        Assert.assertNotNull(results);
+        Assert.assertEquals(0, results.length);
+    }
+
+    @Test
+    public final void testListWebAppPathsOutsideMount() {
+        Assert.assertNull(resourceRoot.listWebAppPaths(getMount() + "d1"));
+    }
+
+    @Test
+    public final void testMkdirOutsideMount() {
+        boolean result = resourceRoot.mkdir(getMount() + getNewDirName());
+        File file = new File(getBaseDir(), getNewDirName());
+        boolean created = file.exists();
+        if (created) {
+            file.delete();
+        }
+        Assert.assertFalse(result);
+        Assert.assertFalse(created);
+    }
+
+    @Test
+    public final void testWriteOutsideMount() {
+        InputStream is = new ByteArrayInputStream("test".getBytes());
+        boolean result = resourceRoot.write(getMount() + getNewFileName(), is, false);
+        File file = new File(getBaseDir(), getNewFileName());
+        boolean created = file.exists();
+        if (created) {
+            file.delete();
+        }
+        Assert.assertFalse(result);
+        Assert.assertFalse(created);
     }
 
     @Override
