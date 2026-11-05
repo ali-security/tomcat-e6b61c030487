@@ -781,6 +781,11 @@ public abstract class AbstractHttp11Protocol<S> extends AbstractProtocol<S> {
     }
 
 
+    public boolean checkSni(String sniHostName, String protocolHostName) {
+        return getEndpoint().checkSni(sniHostName, protocolHostName);
+    }
+
+
     // ------------------------------------------------------------- Common code
 
     @Override
