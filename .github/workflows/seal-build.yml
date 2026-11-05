@@ -1,0 +1,382 @@
+# Sealed-build workflow for org.apache.tomcat.embed:tomcat-embed-core 10.1.25.
+#
+# Upstream Tomcat 10.1.25 ships NO GitHub Actions CI, so this workflow is authored from the
+# project's own build definition (build.xml / build.properties.default / BUILDING.txt):
+#   * artifact: `ant embed-jars` -> output/embed/tomcat-embed-core.jar
+#   * tests:    upstream `ant test` = test-nio + test-nio2 (+ coverage-report, a jacoco
+#               report that executes nothing) + test-status. The same targets are run here,
+#               split into one leg per package that ships in tomcat-embed-core so every leg
+#               stays well under the job time limit.
+#
+# JDK: build.properties.release pins release-java-version=22.0.1+8 and the public 10.1.25 jar
+# carries the FFM/panama classes (org/apache/tomcat/util/openssl/**, .../openssl/panama/**),
+# which build.xml only compiles when the JDK is >= release.java.version (22). So the artifact
+# is built with a plain `ant embed-jars` on Temurin 22 -- no -Drelease.java.version override.
+# Ant: build.properties.release pins release-ant-version=1.10.14, which is the Ubuntu 24.04 ant.
+name: Seal build and test (tomcat-embed-core)
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Space-separated test class names (e.g. TestRfc9218 TestHttp2Section_5_1). Empty runs the full suite."
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  LC_ALL: C.UTF-8
+  LANG: C.UTF-8
+  ANT_OPTS: -Xmx2g
+  TOMCAT_VERSION: 10.1.25
+  TCNATIVE_VERSION: 2.0.15
+  TCNATIVE_SHA512: a0b53890c36c3409e764895cfc521cdbbc49af4d03968f5d3ed72ba686524a05bd15c3f7ab8259fbab091547ecbc2fb7aae8f47d8bc38027db0f6a5dbda65004
+
+jobs:
+  build:
+    name: Build tomcat-embed-core jar
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 22
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '22'
+
+      - name: Install Ant
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ant ant-optional
+          java -version
+          ant -version
+
+      - name: Configure build
+        # base.path defaults to ${user.home}/tomcat-build-libs; keep the downloaded build
+        # dependencies out of the tree. version.dev / ant.tstamp.now.iso come from the
+        # shipped build.properties.release and must not be overridden.
+        run: |
+          mkdir -p "$RUNNER_TEMP/tomcat-build-libs"
+          echo "base.path=$RUNNER_TEMP/tomcat-build-libs" > build.properties
+
+      - name: Build embed jars
+        run: ant -noinput embed-jars
+
+      - name: Stage artifact
+        # Ant emits an unversioned jar; copy (never repack) it under the public name.
+        run: |
+          mkdir -p seal-dist
+          cp output/embed/tomcat-embed-core.jar "seal-dist/tomcat-embed-core-${TOMCAT_VERSION}.jar"
+          ls -l seal-dist
+          echo "jar entries: $(unzip -Z1 seal-dist/tomcat-embed-core-${TOMCAT_VERSION}.jar | wc -l)"
+          echo "FFM/panama entries: $(unzip -Z1 seal-dist/tomcat-embed-core-${TOMCAT_VERSION}.jar | awk '/openssl\/panama\/|tomcat\/util\/openssl\//{n++} END{print n+0}')"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tomcat-embed-core-jar
+          path: seal-dist/tomcat-embed-core-*.jar
+          if-no-files-found: error
+
+  test:
+    name: Test ${{ matrix.batch }} (NIO + NIO2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        batch: [catalina, coyote, tomcat, servlet, juli-naming-performance]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 22
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '22'
+
+      - name: Install Ant and native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ant ant-optional \
+              build-essential libapr1-dev libssl-dev openssl
+          java -version
+          ant -version
+          openssl version
+
+      - name: Build tomcat-native ${{ env.TCNATIVE_VERSION }}
+        # The APR/OpenSSL connector test variants (TesterSupport, TestOpenSSLConf, TestSsl,
+        # TestClientCert, ...) need libtcnative on java.library.path; without it they are
+        # skipped. 2.0.15 is the tcnative release AprLifecycleListener accepts and that runs
+        # cleanly against Ubuntu 24.04's OpenSSL 3.0 (2.0.7, the build.properties.default
+        # pin, SIGSEGVs the JVM on this OpenSSL).
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o tcnative.tar.gz \
+            "https://archive.apache.org/dist/tomcat/tomcat-connectors/native/${TCNATIVE_VERSION}/source/tomcat-native-${TCNATIVE_VERSION}-src.tar.gz"
+          echo "${TCNATIVE_SHA512}  tcnative.tar.gz" | sha512sum -c -
+          tar xzf tcnative.tar.gz
+          cd "tomcat-native-${TCNATIVE_VERSION}-src/native"
+          ./configure --with-apr=/usr/bin/apr-1-config --with-java-home="$JAVA_HOME" \
+              --with-ssl=/usr --prefix="$RUNNER_TEMP/tcnative"
+          make -j"$(nproc)"
+          make install
+          ls -l "$RUNNER_TEMP/tcnative/lib"
+
+      - name: Configure build
+        run: |
+          mkdir -p "$RUNNER_TEMP/tomcat-build-libs"
+          echo "base.path=$RUNNER_TEMP/tomcat-build-libs" > build.properties
+
+      - name: Regenerate expired TLS test fixtures
+        # The checked-in TLS fixtures under test/org/apache/tomcat/util/net/ have expired
+        # (localhost-*.jks / localhost-*-cert.pem on 2025-02-16, user1.jks on 2025-08-15), so
+        # every SSL suite would die with certificate_unknown / "validity check failed". They
+        # never enter the jar. They are regenerated here, in the CI checkout, because the .jks
+        # stores are binary and the version patch is a text diff. Shapes reproduce the
+        # originals (CA "Apache Tomcat Test CA", RSA + EC "localhost" leaves with SAN
+        # DNS:localhost,IP:127.0.0.1, RSA "user1" client leaf; aliases ca/tomcat/user1;
+        # password changeit, localhost-rsa-copy1.jks keyed on tomcatpass), valid 20 years.
+        run: |
+          set -eo pipefail
+          CERTDIR=test/org/apache/tomcat/util/net
+          CERTWORK=$(mktemp -d)
+
+          cat > "$CERTWORK/ca.cnf" <<'CACNF'
+          [req]
+          distinguished_name = dn
+          prompt = no
+          x509_extensions = v3_ca
+          [dn]
+          C  = US
+          ST = MA
+          L  = Wakefield
+          O  = The Apache Software Foundation
+          OU = Apache Tomcat PMC
+          CN = Apache Tomcat Test CA
+          [v3_ca]
+          basicConstraints = CA:TRUE
+          subjectKeyIdentifier = hash
+          CACNF
+
+          cat > "$CERTWORK/localhost.ext" <<'LHEXT'
+          basicConstraints = CA:FALSE
+          nsComment = "OpenSSL Generated Certificate"
+          subjectKeyIdentifier = hash
+          authorityKeyIdentifier = keyid
+          subjectAltName = DNS:localhost,IP:127.0.0.1
+          LHEXT
+
+          cat > "$CERTWORK/user1.ext" <<'U1EXT'
+          basicConstraints = CA:FALSE
+          nsComment = "OpenSSL Generated Certificate"
+          subjectKeyIdentifier = hash
+          authorityKeyIdentifier = keyid
+          keyUsage = digitalSignature,nonRepudiation,keyEncipherment
+          U1EXT
+
+          LEAF_DN="/C=US/ST=DE/L=Wilmington/O=The Apache Software Foundation/OU=Apache Tomcat PMC/CN="
+
+          openssl req -x509 -new -nodes -newkey rsa:4096 -sha256 -days 7300 \
+              -config "$CERTWORK/ca.cnf" -keyout "$CERTWORK/ca-key.pem" -out "$CERTWORK/ca-cert.pem"
+
+          openssl genrsa -out "$CERTWORK/rsa-pkcs1.pem" 2048
+          openssl pkcs8 -topk8 -nocrypt -in "$CERTWORK/rsa-pkcs1.pem" -out "$CERTWORK/localhost-rsa-key.pem"
+          openssl req -new -key "$CERTWORK/localhost-rsa-key.pem" -subj "${LEAF_DN}localhost" -out "$CERTWORK/rsa.csr"
+          openssl x509 -req -in "$CERTWORK/rsa.csr" -CA "$CERTWORK/ca-cert.pem" -CAkey "$CERTWORK/ca-key.pem" \
+              -CAcreateserial -days 7300 -sha256 -extfile "$CERTWORK/localhost.ext" -out "$CERTWORK/localhost-rsa.crt"
+
+          openssl ecparam -name prime256v1 -genkey -noout -out "$CERTWORK/ec-sec1.pem"
+          { openssl ecparam -name prime256v1; cat "$CERTWORK/ec-sec1.pem"; } > "$CERTWORK/localhost-ec-key.pem"
+          openssl req -new -key "$CERTWORK/localhost-ec-key.pem" -subj "${LEAF_DN}localhost" -out "$CERTWORK/ec.csr"
+          openssl x509 -req -in "$CERTWORK/ec.csr" -CA "$CERTWORK/ca-cert.pem" -CAkey "$CERTWORK/ca-key.pem" \
+              -CAcreateserial -days 7300 -sha256 -extfile "$CERTWORK/localhost.ext" -out "$CERTWORK/localhost-ec.crt"
+
+          openssl genrsa -out "$CERTWORK/user1-pkcs1.pem" 2048
+          openssl pkcs8 -topk8 -nocrypt -in "$CERTWORK/user1-pkcs1.pem" -out "$CERTWORK/user1-key.pem"
+          openssl req -new -key "$CERTWORK/user1-key.pem" -subj "${LEAF_DN}user1" -out "$CERTWORK/user1.csr"
+          openssl x509 -req -in "$CERTWORK/user1.csr" -CA "$CERTWORK/ca-cert.pem" -CAkey "$CERTWORK/ca-key.pem" \
+              -CAcreateserial -days 7300 -sha256 -extfile "$CERTWORK/user1.ext" -out "$CERTWORK/user1.crt"
+
+          mk_jks() {
+              local keyf="$1" certf="$2" chainf="$3" jks_alias="$4" out="$5" keypass="$6"
+              local p12="$CERTWORK/${jks_alias}.$(basename "$out").p12"
+              if [ -n "$chainf" ]; then
+                  openssl pkcs12 -export -name "$jks_alias" -inkey "$keyf" -in "$certf" -certfile "$chainf" \
+                      -out "$p12" -passout pass:changeit
+              else
+                  openssl pkcs12 -export -name "$jks_alias" -inkey "$keyf" -in "$certf" \
+                      -out "$p12" -passout pass:changeit
+              fi
+              rm -f "$out"
+              keytool -importkeystore -noprompt \
+                  -srckeystore "$p12" -srcstoretype PKCS12 -srcstorepass changeit -srcalias "$jks_alias" \
+                  -destkeystore "$out" -deststoretype JKS -deststorepass changeit \
+                  -destalias "$jks_alias" -destkeypass "$keypass"
+          }
+
+          rm -f "$CERTDIR/ca.jks"
+          keytool -importcert -noprompt -alias ca -file "$CERTWORK/ca-cert.pem" \
+              -keystore "$CERTDIR/ca.jks" -storetype JKS -storepass changeit
+
+          mk_jks "$CERTWORK/localhost-rsa-key.pem" "$CERTWORK/localhost-rsa.crt" "$CERTWORK/ca-cert.pem" \
+              tomcat "$CERTDIR/localhost-rsa.jks" changeit
+          mk_jks "$CERTWORK/localhost-rsa-key.pem" "$CERTWORK/localhost-rsa.crt" "" \
+              tomcat "$CERTDIR/localhost-rsa-copy1.jks" tomcatpass
+          mk_jks "$CERTWORK/localhost-ec-key.pem" "$CERTWORK/localhost-ec.crt" "" \
+              tomcat "$CERTDIR/localhost-ec.jks" changeit
+          mk_jks "$CERTWORK/user1-key.pem" "$CERTWORK/user1.crt" "$CERTWORK/ca-cert.pem" \
+              user1 "$CERTDIR/user1.jks" changeit
+
+          cp "$CERTWORK/ca-cert.pem"           "$CERTDIR/ca-cert.pem"
+          cp "$CERTWORK/localhost-rsa-key.pem" "$CERTDIR/localhost-rsa-key.pem"
+          cp "$CERTWORK/localhost-ec-key.pem"  "$CERTDIR/localhost-ec-key.pem"
+          openssl x509 -in "$CERTWORK/localhost-rsa.crt" -text > "$CERTDIR/localhost-rsa-cert.pem"
+          openssl x509 -in "$CERTWORK/localhost-ec.crt"  -text > "$CERTDIR/localhost-ec-cert.pem"
+          chmod 644 "$CERTDIR"/*.jks "$CERTDIR"/*.pem
+
+          openssl verify -CAfile "$CERTDIR/ca-cert.pem" "$CERTDIR/localhost-rsa-cert.pem"
+          openssl verify -CAfile "$CERTDIR/ca-cert.pem" "$CERTDIR/localhost-ec-cert.pem"
+          keytool -list -keystore "$CERTDIR/localhost-rsa.jks"       -storepass changeit -alias tomcat
+          keytool -list -keystore "$CERTDIR/localhost-rsa-copy1.jks" -storepass changeit -alias tomcat
+          keytool -list -keystore "$CERTDIR/localhost-ec.jks"        -storepass changeit -alias tomcat
+          keytool -list -keystore "$CERTDIR/user1.jks"               -storepass changeit -alias user1
+          keytool -list -keystore "$CERTDIR/ca.jks"                  -storepass changeit -alias ca
+          rm -rf "$CERTWORK"
+
+      - name: Run tests (ant test-nio test-nio2 test-status)
+        env:
+          TEST_FILTER: ${{ inputs.test-filter }}
+          BATCH: ${{ matrix.batch }}
+        run: |
+          set -o pipefail
+          LOGDIR=output/build/logs
+          # build.properties.default ships test.haltonfailure=false, so the <junit> task never
+          # fails the build; only the `test-status` target turns failures/errors into a
+          # non-zero exit, hence it is appended to every ant invocation (as upstream `ant test`
+          # does). test.verbose=false keeps per-test stdout in the suite .txt files.
+          COMMON="-Dtest.threads=4 -Dtest.verbose=false -Dtest.apr.loc=$RUNNER_TEMP/tcnative/lib"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/tcnative/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          # build.xml sets no JUnit timeout; cap each ant run so a hung suite fails the leg
+          # with a summary instead of running into the job timeout.
+          TIMEOUT="timeout --kill-after=60 2400"
+          rm -rf "$LOGDIR"
+          failed=""
+          RESULTS=""
+
+          run_batch() {
+              local label="$1"; shift
+              local rc
+              if $TIMEOUT ant -noinput test-nio test-nio2 "$@" test-status; then
+                  rc=0
+              else
+                  rc=$?
+                  failed="${failed} ${label}"
+              fi
+              echo "batch ${label} rc=${rc}"
+              RESULTS="${RESULTS}batch ${label} rc=${rc}"$'\n'
+          }
+
+          if [ -n "$TEST_FILTER" ]; then
+              # Subset mode: the 'catalina' leg runs exactly the named test classes (from any
+              # package); the other legs have nothing to do.
+              if [ "$BATCH" != "catalina" ]; then
+                  echo "test-filter is set (${TEST_FILTER}); the selected tests run in the 'catalina' leg only."
+                  exit 0
+              fi
+              PATTERN=""
+              for tc in $TEST_FILTER; do
+                  case "$tc" in
+                      *.java) p="**/${tc}" ;;
+                      *)      p="**/${tc}.java" ;;
+                  esac
+                  PATTERN="${PATTERN:+${PATTERN},}${p}"
+              done
+              echo "Running SUBSET of tests: ${PATTERN}"
+              run_batch subset $COMMON -Dtest.name="$PATTERN"
+          else
+              ALLPKGS="org/apache/catalina org/apache/coyote org/apache/tomcat org/apache/juli org/apache/naming jakarta/servlet"
+              case "$BATCH" in
+                  catalina) PKGS="org/apache/catalina" ;;
+                  coyote)   PKGS="org/apache/coyote" ;;
+                  tomcat)   PKGS="org/apache/tomcat" ;;
+                  servlet)  PKGS="jakarta/servlet" ;;
+                  juli-naming-performance) PKGS="org/apache/juli org/apache/naming" ;;
+                  *) echo "unknown batch $BATCH"; exit 1 ;;
+              esac
+              # Timing-based *Performance tests are excluded from the parallel package runs
+              # (upstream's test.excludePerformance switch) and run single-threaded in their
+              # own batch, so a loaded 4-thread runner cannot make them miss their thresholds.
+              for pkg in $PKGS; do
+                  run_batch "$pkg" $COMMON -Dtest.excludePerformance=true -Dtest.name="${pkg}/**/Test*.java"
+              done
+              if [ "$BATCH" = "juli-naming-performance" ]; then
+                  PERF=""
+                  for pkg in $ALLPKGS; do
+                      PERF="${PERF:+${PERF},}${pkg}/**/Test*Performance.java"
+                  done
+                  run_batch performance -Dtest.threads=1 -Dtest.verbose=false \
+                      -Dtest.apr.loc="$RUNNER_TEMP/tcnative/lib" -Dtest.name="${PERF}"
+              fi
+          fi
+
+          # ------------------------------------------------------------ result summary
+          suites=0; tests=0; failures=0; errors=0; skipped=0; bad=""
+          echo "=================== PER-SUITE TEST SUMMARY ==================="
+          for f in "$LOGDIR"/TEST-*.txt; do
+              [ -e "$f" ] || continue
+              name=$(basename "$f" .txt); name=${name#TEST-}
+              hdr=$(awk '/^Tests run:/{print; exit}' "$f")
+              if [ -n "$hdr" ]; then
+                  t=$(printf '%s' "$hdr"  | sed -n 's/.*Tests run: *\([0-9][0-9]*\).*/\1/p')
+                  fa=$(printf '%s' "$hdr" | sed -n 's/.*Failures: *\([0-9][0-9]*\).*/\1/p')
+                  er=$(printf '%s' "$hdr" | sed -n 's/.*Errors: *\([0-9][0-9]*\).*/\1/p')
+                  sk=$(printf '%s' "$hdr" | sed -n 's/.*Skipped: *\([0-9][0-9]*\).*/\1/p')
+              else
+                  # Ant's plain formatter occasionally omits the header; derive from testcases.
+                  t=$(awk '/^Testcase:/{n++} END{print n+0}' "$f")
+                  fa=$(awk '/^[[:space:]]*FAILED/{n++} END{print n+0}' "$f")
+                  er=$(awk '/Caused an ERROR/{n++} END{print n+0}' "$f")
+                  sk=$(awk '/^[[:space:]]*SKIPPED/{n++} END{print n+0}' "$f")
+              fi
+              t=${t:-0}; fa=${fa:-0}; er=${er:-0}; sk=${sk:-0}
+              echo "suite=${name} tests=${t} passed=$((t - fa - er - sk)) failures=${fa} errors=${er} skipped=${sk}"
+              suites=$((suites + 1)); tests=$((tests + t)); failures=$((failures + fa))
+              errors=$((errors + er)); skipped=$((skipped + sk))
+              if [ "$fa" -gt 0 ] || [ "$er" -gt 0 ]; then bad="${bad}${name} (failures=${fa} errors=${er})"$'\n'; fi
+          done
+          passed=$((tests - failures - errors - skipped))
+
+          echo "=================== SKIPPED TESTS (name and reason) ==================="
+          awk '
+            FNR == 1 { suite = FILENAME; sub(/.*\/TEST-/, "", suite); sub(/\.txt$/, "", suite) }
+            /^Testcase: / { tc = $0; sub(/^Testcase: /, "", tc); sub(/ took [0-9.,]+ sec.*$/, "", tc); next }
+            /^[[:space:]]*SKIPPED/ {
+              msg = $0; sub(/^[[:space:]]*SKIPPED:?[[:space:]]*/, "", msg)
+              # Message-less upstream Assume calls only report the hamcrest text "got: <true>,
+              # expected: is <false>"; name the actual cause for the ones this suite hits.
+              if (suite ~ /TestMessageBytesPerformance/ && tc ~ /testConversionPerformance/)
+                msg = "upstream Assume.assumeFalse(JreCompat.isJre16Available()) at TestMessageBytesPerformance.java:60 -- ISO-8859-1 conversion is JVM-optimised on Java 16+, so this optimised-vs-naive timing comparison only applies to JRE < 16; this build runs JDK 22 (assumption output: " msg ")"
+              if (msg == "")
+                msg = "upstream Assume without message (see test source)"
+              print "SKIPPED " suite " :: " tc " -- reason: " msg
+            }
+          ' "$LOGDIR"/TEST-*.txt 2>/dev/null
+          echo "======================================================================="
+          if [ -n "$bad" ]; then printf 'SUITES WITH FAILURES OR ERRORS:\n%s' "$bad"; else echo "SUITES WITH FAILURES OR ERRORS: none"; fi
+          printf '%s' "$RESULTS"
+          echo "TOTALS [${BATCH}]: suites=${suites} tests=${tests} passed=${passed} failures=${failures} errors=${errors} skipped=${skipped}"
+
+          if [ "$tests" -eq 0 ]; then
+              echo "ERROR: zero test cases executed"
+              exit 1
+          fi
+          if [ -n "$failed" ]; then
+              echo "AT LEAST ONE TEST BATCH FAILED:${failed}"
+              exit 1
+          fi
+          echo "ALL TEST BATCHES PASSED [${BATCH}]: ${passed} of ${tests} tests passed, ${skipped} skipped"
