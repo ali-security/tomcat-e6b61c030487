@@ -299,17 +299,156 @@ public class TestRewriteValve extends TomcatBaseTest {
     }
 
     @Test
-    public void testQueryString() throws Exception {
+    public void testQueryStringTargetOnly() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?je=2", "/b/id=1", "/c/id=1", "je=2");
+    }
+
+    @Test
+    public void testQueryStringTargetOnlyQSA() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?je=2 [QSA]", "/b/id=1", "/c/id=1", "je=2");
+    }
+
+    @Test
+    public void testQueryStringTargetOnlyQSD() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?je=2 [QSD]", "/b/id=1", "/c/id=1", "je=2");
+    }
+
+    @Test
+    public void testQueryStringTargetOnlyQSAQSD() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?je=2 [QSA,QSD]", "/b/id=1", "/c/id=1", "je=2");
+    }
+
+    @Test
+    public void testQueryStringTargetOnlyQS() throws Exception {
         doTestRewrite("RewriteRule ^/b/(.*) /c?$1", "/b/id=1", "/c", "id=1");
     }
 
     @Test
+    public void testQueryStringTargetOnlyQSAQS() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c?$1 [QSA]", "/b/id=1", "/c", "id=1");
+    }
+
+    @Test
+    public void testQueryStringTargetOnlyQSDQS() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c?$1 [QSD]", "/b/id=1", "/c", "id=1");
+    }
+
+    @Test
+    public void testQueryStringTargetOnlyQSAQSDQS() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c?$1 [QSA,QSD]", "/b/id=1", "/c", "id=1");
+    }
+
+    @Test
+    public void testQueryStringSourceOnly() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1", "/b/d?id=1", "/c/d", "id=1");
+    }
+
+    @Test
+    public void testQueryStringSourceOnlyQSA() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1 [QSA]", "/b/d?id=1", "/c/d", "id=1");
+    }
+
+    @Test
+    public void testQueryStringSourceOnlyQSD() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1 [QSD]", "/b/d?id=1", "/c/d", null);
+    }
+
+    @Test
+    public void testQueryStringSourceOnlyQSAQSD() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1 [QSA,QSD]", "/b/d?id=1", "/c/d", null);
+    }
+
+    @Test
+    public void testQueryStringSourceAndTarget() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?id=1", "/b/d?je=2", "/c/d", "id=1");
+    }
+
+    @Test
+    public void testQueryStringSourceAndTargetQSA() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?id=1 [QSA]", "/b/d?je=2", "/c/d", "id=1&je=2");
+    }
+
+    @Test
+    public void testQueryStringSourceAndTargetQSD() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?id=1 [QSD]", "/b/d?je=2", "/c/d", "id=1");
+    }
+
+    @Test
+    public void testQueryStringSourceAndTargetQSAQSD() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?id=1 [QSA,QSD]", "/b/d?je=2", "/c/d", "id=1");
+    }
+
+    @Test
+    public void testQueryStringEncoded01() throws Exception {
+        doTestRewrite("RewriteCond %{QUERY_STRING} a=(.*)\nRewriteRule ^/b.*$ /%1 [QSD]", "/b?a=c", "/c", null);
+    }
+
+    @Test
+    public void testQueryStringEncoded02() throws Exception {
+        // The re-written URL is decoded before it is normalized so the encoded
+        // '../' sequence taken from the query string is resolved rather than
+        // surviving into the decoded URI. Note the '%' characters are encoded
+        // in the request URI, which is the existing behaviour of this version
+        // for a URL re-written to include a literal '%' character.
+        doTestRewrite("RewriteCond %{QUERY_STRING} a=(.*)\nRewriteRule ^/b.*$ /z/%1 [QSD]", "/b?a=%2e%2e%2fc%2faAbB",
+                "/z/%252e%252e%252fc%252faAbB", null);
+    }
+
+    @Test
+    public void testQueryStringEncodedTraversal() throws Exception {
+        // CVE-2025-55752. An encoded '../' sequence inserted into the
+        // re-written URL from the query string must be decoded before the URL
+        // is normalized. If it is not, the still encoded (or, once decoded,
+        // un-normalized) sequence is used for mapping and for any subsequent
+        // access control decisions.
+        Tomcat tomcat = getTomcatInstance();
+
+        // No file system docBase required
+        Context ctx = tomcat.addContext("", null);
+
+        RewriteValve rewriteValve = new RewriteValve();
+        ctx.getPipeline().addValve(rewriteValve);
+
+        rewriteValve.setConfiguration("RewriteCond %{QUERY_STRING} a=(.*)\n" + "RewriteRule ^/b.*$ /z/%1 [QSD]");
+
+        Tomcat.addServlet(ctx, "snoop", new SnoopServlet());
+        ctx.addServletMappingDecoded("/c/*", "snoop");
+        Tomcat.addServlet(ctx, "default", new DefaultServlet());
+        ctx.addServletMappingDecoded("/", "default");
+
+        tomcat.start();
+
+        ByteChunk res = new ByteChunk();
+        int rc = getUrl("http://localhost:" + getPort() + "/b?a=%2e%2e%2fc%2faAbB", res, null);
+        res.setCharset(StandardCharsets.UTF_8);
+
+        Assert.assertEquals(HttpServletResponse.SC_OK, rc);
+
+        RequestDescriptor requestDesc = SnoopResult.parse(res.toString());
+        // The '../' sequence must have been resolved before mapping
+        Assert.assertEquals("/c", requestDesc.getRequestInfo("REQUEST-SERVLET-PATH"));
+        Assert.assertEquals("/aAbB", requestDesc.getRequestInfo("REQUEST-PATH-INFO"));
+        // The original query string must have been discarded ([QSD])
+        Assert.assertTrue(requestDesc.getParams().isEmpty());
+    }
+
+    @Test
     public void testQueryStringRemove() throws Exception {
-        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?", "/b/d?=1", "/c/d", null);
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?", "/b/d?id=1", "/c/d", null);
     }
 
     @Test
     public void testQueryStringRemove02() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1 [QSD]", "/b/d?id=1", "/c/d", null);
+    }
+
+    @Test
+    public void testQueryStringRemoveInvalid() throws Exception {
+        doTestRewrite("RewriteRule ^/b/(.*) /c/$1?", "/b/d?=1", "/c/d", null);
+    }
+
+    @Test
+    public void testQueryStringRemoveInvalid02() throws Exception {
         doTestRewrite("RewriteRule ^/b/(.*) /c/$1 [QSD]", "/b/d?=1", "/c/d", null);
     }
 
@@ -614,7 +753,7 @@ public class TestRewriteValve extends TomcatBaseTest {
     public void testFlagsNC() throws Exception {
         // https://bz.apache.org/bugzilla/show_bug.cgi?id=60116
         doTestRewrite("RewriteCond %{QUERY_STRING} a=([a-z]*) [NC]\n" + "RewriteRule .* - [E=X-Test:%1]", "/c?a=aAa",
-                "/c", null, "aAa");
+                "/c", "a=aAa", "aAa");
     }
 
 
@@ -760,6 +899,9 @@ public class TestRewriteValve extends TomcatBaseTest {
         rewriteValve.setConfiguration(config);
 
         Tomcat.addServlet(ctx, "snoop", new SnoopServlet());
+        // The re-written URL is decoded before it is normalized so a re-write
+        // that inserts %5A now maps to the decoded form
+        ctx.addServletMappingDecoded("/a/Z", "snoop");
         ctx.addServletMappingDecoded("/a/%5A", "snoop");
         ctx.addServletMappingDecoded("/c/*", "snoop");
         ctx.addServletMappingDecoded("/W/*", "snoop");
@@ -777,12 +919,16 @@ public class TestRewriteValve extends TomcatBaseTest {
             // were written into the request target
             Assert.assertEquals(400, rc);
         } else {
+            // If there is an expected URI, the request should be successful
+            Assert.assertEquals(200, rc);
             String body = res.toString();
             RequestDescriptor requestDesc = SnoopResult.parse(body);
             String requestURI = requestDesc.getRequestInfo("REQUEST-URI");
             Assert.assertEquals(expectedURI, requestURI);
 
-            if (expectedQueryString != null) {
+            if (expectedQueryString == null) {
+                Assert.assertTrue(requestDesc.getParams().isEmpty());
+            } else {
                 String queryString = requestDesc.getRequestInfo("REQUEST-QUERY-STRING");
                 Assert.assertEquals(expectedQueryString, queryString);
             }
