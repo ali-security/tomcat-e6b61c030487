@@ -171,8 +171,11 @@ abstract class AbstractStream {
      * @param connectionAllocationRequested the value
      */
     final void setConnectionAllocationRequested(int connectionAllocationRequested) {
-        log.trace(sm.getString("abstractStream.setConnectionAllocationRequested", getConnectionId(), getIdAsString(),
-                Integer.toString(this.connectionAllocationRequested), Integer.toString(connectionAllocationRequested)));
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("abstractStream.setConnectionAllocationRequested", getConnectionId(),
+                    getIdAsString(), Integer.toString(this.connectionAllocationRequested),
+                    Integer.toString(connectionAllocationRequested)));
+        }
         this.connectionAllocationRequested = connectionAllocationRequested;
     }
 
@@ -190,8 +193,10 @@ abstract class AbstractStream {
      * @param connectionAllocationMade the value
      */
     final void setConnectionAllocationMade(int connectionAllocationMade) {
-        log.trace(sm.getString("abstractStream.setConnectionAllocationMade", getConnectionId(), getIdAsString(),
-                Integer.toString(this.connectionAllocationMade), Integer.toString(connectionAllocationMade)));
+        if (log.isTraceEnabled()) {
+            log.trace(sm.getString("abstractStream.setConnectionAllocationMade", getConnectionId(), getIdAsString(),
+                    Integer.toString(this.connectionAllocationMade), Integer.toString(connectionAllocationMade)));
+        }
         this.connectionAllocationMade = connectionAllocationMade;
     }
 

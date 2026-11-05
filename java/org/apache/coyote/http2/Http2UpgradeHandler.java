@@ -974,24 +974,26 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                      * stream was not already added to the backlog due to an partial reservation (see next else if
                      * block) add it to the backlog so it can obtain an allocation when capacity is available.
                      */
-                    if (stream.getConnectionAllocationMade() == 0 && stream.getConnectionAllocationRequested() == 0) {
+                    if (stream.getConnectionAllocationRequested() == 0) {
                         stream.setConnectionAllocationRequested(reservation);
                         backLogSize += reservation;
                         backLogStreams.add(stream);
                     }
                 } else if (windowSize < reservation) {
                     /*
-                     * The connection window has some capacity but not enough to fill this reservation. Allocate what
-                     * capacity is available and add the stream to the backlog so it can obtain a further allocation
-                     * when capacity is available.
+                     * The connection window has some capacity but not enough to fill this reservation. If the stream
+                     * has not been granted an allocation and the stream was not already added to the backlog, allocate
+                     * what capacity is available and add the stream to the backlog so it can obtain a further
+                     * allocation when capacity is available.
                      */
-                    allocation = (int) windowSize;
-                    decrementWindowSize(allocation);
-                    int reservationRemaining = reservation - allocation;
-                    stream.setConnectionAllocationRequested(reservationRemaining);
-                    backLogSize += reservationRemaining;
-                    backLogStreams.add(stream);
-
+                    if (stream.getConnectionAllocationRequested() == 0) {
+                        allocation = (int) windowSize;
+                        decrementWindowSize(allocation);
+                        int reservationRemaining = reservation - allocation;
+                        stream.setConnectionAllocationRequested(reservationRemaining);
+                        backLogSize += reservationRemaining;
+                        backLogStreams.add(stream);
+                    }
                 } else {
                      // The connection window has sufficient capacity for this reservation. Allocate the full amount.
                     allocation = reservation;
@@ -1033,8 +1035,13 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                             // stream is closing
                             stream.doStreamCancel(msg, error);
                         } else {
-                            allocation = stream.getConnectionAllocationMade();
-                            stream.setConnectionAllocationMade(0);
+                            // Don't consume the allocation if the stream can no longer use it.
+                            if (stream.canWrite()) {
+                                allocation = stream.getConnectionAllocationMade();
+                                stream.setConnectionAllocationMade(0);
+                            } else {
+                                stream.doStreamCancel(sm.getString("stream.clientCancel"), Http2Error.STREAM_CLOSED);
+                            }
                         }
                     } catch (InterruptedException e) {
                         throw new IOException(sm.getString("upgradeHandler.windowSizeReservationInterrupted",
@@ -1100,7 +1107,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
     }
 
 
-    private Set<AbstractStream> releaseBackLog(int increment) throws Http2Exception {
+    private Set<AbstractStream> releaseBackLog(final int increment) throws Http2Exception {
         windowAllocationLock.lock();
         try {
             Set<AbstractStream> result = new HashSet<>();
@@ -1226,6 +1233,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
                 }
                 stream.setConnectionAllocationRequested(stream.getConnectionAllocationRequested() - allocatedThisTime);
                 stream.setConnectionAllocationMade(stream.getConnectionAllocationMade() + allocatedThisTime);
+                backLogSize -= allocatedThisTime;
                 leftToAllocate = leftToAllocate - allocatedThisTime;
             }
 
@@ -1927,6 +1935,47 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         // Only replace the stream if it currently uses the full implementation.
         if (current instanceof Stream) {
             streams.put(original.getIdentifier(), replacement);
+
+            int made;
+            original.windowAllocationLock.lock();
+            try {
+                windowAllocationLock.lock();
+                try {
+                    /*
+                     * If the stream being replaced is still in the backlog (usually because it has been reset) remove
+                     * the stream from the backlog along with its allocation request
+                     */
+                    if (backLogStreams.remove(original)) {
+                        // Remove unallocated request from the backlog
+                        backLogSize -= original.getConnectionAllocationRequested();
+                        // Not strictly necessary, but set for consistency
+                        original.setConnectionAllocationRequested(0);
+                    }
+                    made = original.getConnectionAllocationMade();
+                    // Not strictly necessary, but set for consistency
+                    original.setConnectionAllocationMade(0);
+                } finally {
+                    windowAllocationLock.unlock();
+                }
+            } finally {
+                original.windowAllocationLock.unlock();
+            }
+
+            /*
+             * If the stream had received an allocation but not used it, return that allocation to the connection
+             * window.
+             */
+            if (made > 0) {
+                try {
+                    incrementWindowSize(made);
+                } catch (Http2Exception e) {
+                    /*
+                     * Should not happen in normal usage. The exception only occurs if the Window size is increased
+                     * beyond 2^31-1. If a client tries hard enough, it will be able to break its own connection.
+                     */
+                    throw new IllegalStateException(e);
+                }
+            }
         }
     }
 
