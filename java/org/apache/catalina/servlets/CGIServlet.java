@@ -43,12 +43,16 @@ import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.ServletConfig;
 import jakarta.servlet.ServletContext;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.UnavailableException;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.servlet.http.HttpSession;
 
+import org.apache.catalina.Globals;
+import org.apache.catalina.WebResource;
+import org.apache.catalina.WebResourceRoot;
 import org.apache.catalina.util.IOTools;
 import org.apache.juli.logging.Log;
 import org.apache.juli.logging.LogFactory;
@@ -243,6 +247,8 @@ public final class CGIServlet extends HttpServlet {
     private Set<String> cgiMethods = new HashSet<>();
     private boolean cgiMethodsAll = false;
 
+    private transient WebResourceRoot resources = null;
+
 
     /**
      * The time (in milliseconds) to wait for the reading of stderr to complete before terminating the CGI process.
@@ -377,6 +383,13 @@ public final class CGIServlet extends HttpServlet {
             cmdLineArgumentsDecodedPattern = null;
         } else if (value != null) {
             cmdLineArgumentsDecodedPattern = Pattern.compile(value);
+        }
+
+        // Load the web resources
+        resources = (WebResourceRoot) getServletContext().getAttribute(Globals.RESOURCES_ATTR);
+
+        if (resources == null) {
+            throw new UnavailableException(sm.getString("cgiServlet.noResources"));
         }
     }
 
@@ -623,9 +636,6 @@ public final class CGIServlet extends HttpServlet {
         /** pathInfo for the current request */
         private String pathInfo = null;
 
-        /** real file system directory of the enclosing servlet's web app */
-        private String webAppRootDir = null;
-
         /** tempdir for context - used to expand scripts in unexpanded wars */
         private File tmpDir = null;
 
@@ -679,7 +689,6 @@ public final class CGIServlet extends HttpServlet {
          */
         protected void setupFromContext(ServletContext context) {
             this.context = context;
-            this.webAppRootDir = context.getRealPath("/");
             this.tmpDir = (File) context.getAttribute(ServletContext.TEMPDIR);
         }
 
@@ -786,10 +795,9 @@ public final class CGIServlet extends HttpServlet {
          * cgiPathPrefix is defined by setting this servlet's cgiPathPrefix init parameter
          * </p>
          *
-         * @param pathInfo      String from HttpServletRequest.getPathInfo()
-         * @param webAppRootDir String from context.getRealPath("/")
          * @param contextPath   String as from HttpServletRequest.getContextPath()
          * @param servletPath   String as from HttpServletRequest.getServletPath()
+         * @param pathInfo      String from HttpServletRequest.getPathInfo()
          * @param cgiPathPrefix subdirectory of webAppRootDir below which the web app's CGIs may be stored; can be null.
          *                          The CGI search path will start at webAppRootDir + File.separator + cgiPathPrefix (or
          *                          webAppRootDir alone if cgiPathPrefix is null). cgiPathPrefix is defined by setting
@@ -806,58 +814,110 @@ public final class CGIServlet extends HttpServlet {
          *             found
          *             </ul>
          */
+        // overload to make sure that it wont break in some weird scenario.
         protected String[] findCGI(String pathInfo, String webAppRootDir, String contextPath, String servletPath,
                 String cgiPathPrefix) {
-            String path = null;
-            String name = null;
-            String scriptname = null;
+                return findCGI(contextPath, servletPath, pathInfo, cgiPathPrefix);
 
-            if (webAppRootDir.lastIndexOf(File.separator) == (webAppRootDir.length() - 1)) {
-                // strip the trailing "/" from the webAppRootDir
-                webAppRootDir = webAppRootDir.substring(0, (webAppRootDir.length() - 1));
-            }
+        }
 
-            if (cgiPathPrefix != null) {
-                webAppRootDir = webAppRootDir + File.separator + cgiPathPrefix;
-            }
+        protected String[] findCGI(String contextPath, String servletPath, String pathInfo, String cgiPathPrefix) {
 
-            if (log.isTraceEnabled()) {
-                log.trace(sm.getString("cgiServlet.find.path", pathInfo, webAppRootDir));
-            }
+            StringBuilder cgiPath = new StringBuilder();
+            StringBuilder urlPath = new StringBuilder();
 
-            File currentLocation = new File(webAppRootDir);
-            StringTokenizer dirWalker = new StringTokenizer(pathInfo, "/");
-            if (log.isTraceEnabled()) {
-                log.trace(sm.getString("cgiServlet.find.location", currentLocation.getAbsolutePath()));
+            WebResource cgiScript = null;
+
+            if (cgiPathPrefix == null || cgiPathPrefix.isEmpty()) {
+                cgiPath.append(servletPath);
+            } else {
+                cgiPath.append('/');
+                cgiPath.append(cgiPathPrefix);
             }
-            StringBuilder cginameBuilder = new StringBuilder();
-            while (!currentLocation.isFile() && dirWalker.hasMoreElements()) {
-                String nextElement = (String) dirWalker.nextElement();
-                currentLocation = new File(currentLocation, nextElement);
-                cginameBuilder.append('/').append(nextElement);
+            urlPath.append(servletPath);
+
+            StringTokenizer pathWalker = new StringTokenizer(pathInfo, "/");
+
+            while (pathWalker.hasMoreElements() && (cgiScript == null || !cgiScript.isFile())) {
+                String urlSegment = pathWalker.nextToken();
+                cgiPath.append('/');
+                cgiPath.append(urlSegment);
+                urlPath.append('/');
+                urlPath.append(urlSegment);
                 if (log.isTraceEnabled()) {
-                    log.trace(sm.getString("cgiServlet.find.location", currentLocation.getAbsolutePath()));
+                    log.trace(sm.getString("cgiServlet.find.location", cgiPath.toString()));
                 }
+                cgiScript = resources.getResource(cgiPath.toString());
             }
-            String cginame = cginameBuilder.toString();
-            if (!currentLocation.isFile()) {
+
+            // No script was found
+            if (cgiScript == null || !cgiScript.isFile()) {
                 return new String[] { null, null, null, null };
             }
 
-            path = currentLocation.getAbsolutePath();
-            name = currentLocation.getName();
+            // Set-up return values
+            String path = null;
+            String scriptName = null;
+            String cgiName = null;
+            String name = null;
 
-            if (servletPath.startsWith(cginame)) {
-                scriptname = contextPath + cginame;
-            } else {
-                scriptname = contextPath + servletPath + cginame;
+            path = cgiScript.getCanonicalPath();
+            if (path == null) {
+                /*
+                 * The script doesn't exist directly on the file system. It might be located in an archive or similar.
+                 * Such scripts are extracted to the web application's temporary file location.
+                 */
+                File tmpCgiFile = new File(tmpDir + cgiPath.toString());
+                if (!tmpCgiFile.exists()) {
+
+                    // Create directories
+                    File parent = tmpCgiFile.getParentFile();
+                    if (!parent.mkdirs() && !parent.isDirectory()) {
+                        log.warn(sm.getString("cgiServlet.expandCreateDirFail", parent.getAbsolutePath()));
+                        return new String[] { null, null, null, null };
+                    }
+
+                    try (InputStream is = cgiScript.getInputStream()) {
+                        synchronized (expandFileLock) {
+                            // Check if file was created by concurrent request
+                            if (!tmpCgiFile.exists()) {
+                                try {
+                                    Files.copy(is, tmpCgiFile.toPath());
+                                } catch (IOException ioe) {
+                                    log.warn(sm.getString("cgiServlet.expandFail", cgiScript.getURL(),
+                                            tmpCgiFile.getAbsolutePath()), ioe);
+                                    if (tmpCgiFile.exists()) {
+                                        if (!tmpCgiFile.delete()) {
+                                            log.warn(sm.getString("cgiServlet.expandDeleteFail",
+                                                    tmpCgiFile.getAbsolutePath()));
+                                        }
+                                    }
+                                    return new String[] { null, null, null, null };
+                                }
+                                if (log.isDebugEnabled()) {
+                                    log.debug(sm.getString("cgiServlet.expandOk", cgiScript.getURL(),
+                                            tmpCgiFile.getAbsolutePath()));
+                                }
+                            }
+                        }
+                    } catch (IOException ioe) {
+                        log.warn(sm.getString("cgiServlet.expandCloseFail", cgiScript.getURL()), ioe);
+                    }
+                }
+                path = tmpCgiFile.getAbsolutePath();
             }
+
+            scriptName = urlPath.toString();
+            cgiName = scriptName.substring(servletPath.length());
+            name = scriptName.substring(scriptName.lastIndexOf('/') + 1);
 
             if (log.isTraceEnabled()) {
-                log.trace(sm.getString("cgiServlet.find.found", name, path, scriptname, cginame));
+                log.trace(sm.getString("cgiServlet.find.found", name, path, scriptName, cgiName));
             }
-            return new String[] { path, scriptname, cginame, name };
+
+            return new String[] { path, scriptName, cgiName, name };
         }
+
 
         /**
          * Constructs the CGI environment to be supplied to the invoked CGI script; relies heavily on Servlet API
@@ -893,13 +953,7 @@ public final class CGIServlet extends HttpServlet {
             sPathInfoOrig = this.pathInfo;
             sPathInfoOrig = sPathInfoOrig == null ? "" : sPathInfoOrig;
 
-            if (webAppRootDir == null) {
-                // The app has not been deployed in exploded form
-                webAppRootDir = tmpDir.toString();
-                expandCGIScript();
-            }
-
-            sCGINames = findCGI(sPathInfoOrig, webAppRootDir, contextPath, servletPath, cgiPathPrefix);
+            sCGINames = findCGI(contextPath, servletPath, sPathInfoOrig, cgiPathPrefix);
 
             sCGIFullPath = sCGINames[0];
             sCGIScriptName = sCGINames[1];
@@ -1029,7 +1083,10 @@ public final class CGIServlet extends HttpServlet {
         /**
          * Extracts requested resource from web app archive to context work directory to enable CGI script to be
          * executed.
+         *
+         * @deprecated Unused. Script extraction now happens in findCGI(). Retained for compatibility.
          */
+        @Deprecated
         protected void expandCGIScript() {
             StringBuilder srcPath = new StringBuilder();
             StringBuilder destPath = new StringBuilder();
@@ -1111,7 +1168,6 @@ public final class CGIServlet extends HttpServlet {
                 }
             }
         }
-
 
         /**
          * Returns important CGI environment information in a multi-line text format.
@@ -1412,9 +1468,9 @@ public final class CGIServlet extends HttpServlet {
          * <LI><u>Allowed characters in path segments</u>: This implementation does not allow non-terminal NULL segments
          * in the the path -- IOExceptions may be thrown;
          * <LI><u>"<code>.</code>" and "<code>..</code>" path segments</u>: This implementation does not allow
-         * "<code>.</code>" and "<code>..</code>" in the the path, and such characters will result in an IOException
-         * being thrown (this should never happen since Tomcat normalises the requestURI before determining the
-         * contextPath, servletPath and pathInfo);
+         * "<code>.</code>" and "<code>..</code>" in the path, and such characters will result in an IOException being
+         * thrown (this should never happen since Tomcat normalises the requestURI before determining the contextPath,
+         * servletPath and pathInfo);
          * <LI><u>Implementation limitations</u>: This implementation does not impose any limitations except as
          * documented above. This implementation may be limited by the servlet container used to house this
          * implementation. In particular, all the primary CGI variable values are derived either directly or indirectly
