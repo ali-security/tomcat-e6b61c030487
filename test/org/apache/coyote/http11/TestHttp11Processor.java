@@ -1843,8 +1843,7 @@ public class TestHttp11Processor extends TomcatBaseTest {
 
         client.connect();
         client.processRequest();
-        Assert.assertTrue(client.isResponse200());
-        Assert.assertTrue(client.getResponseBody().contains("test - data"));
+        Assert.assertTrue(client.isResponse400());
     }
 
 
