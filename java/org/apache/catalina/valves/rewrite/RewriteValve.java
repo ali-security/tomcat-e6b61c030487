@@ -65,6 +65,24 @@ import org.apache.tomcat.util.http.RequestUtil;
  */
 public class RewriteValve extends ValveBase {
 
+    private static final URLEncoder REWRITE_DEFAULT_ENCODER;
+    private static final URLEncoder REWRITE_QUERY_ENCODER;
+
+    static {
+        /*
+         * See the detailed explanation of encoding/decoding during URL re-writing in the invoke() method.
+         *
+         * These encoders perform the second stage of encoding, after re-writing has completed. These rewrite specific
+         * encoders treat '%' as a safe character so that URLs and query strings already processed by encodeForRewrite()
+         * do not end up with double encoding of '%' characters.
+         */
+        REWRITE_DEFAULT_ENCODER = (URLEncoder) URLEncoder.DEFAULT.clone();
+        REWRITE_DEFAULT_ENCODER.addSafeCharacter('%');
+
+        REWRITE_QUERY_ENCODER = (URLEncoder) URLEncoder.QUERY.clone();
+        REWRITE_QUERY_ENCODER.addSafeCharacter('%');
+    }
+
     /**
      * The rewrite rules that the valve will use.
      */
@@ -305,15 +323,45 @@ public class RewriteValve extends ValveBase {
             MessageBytes urlMB = context ? request.getRequestPathMB() : request.getDecodedRequestURIMB();
             urlMB.toChars();
             CharSequence urlDecoded = urlMB.getCharChunk();
+
+            /*
+             * The URL presented to the rewrite valve is the URL that is used for request mapping. That URL has been
+             * processed to: remove path parameters; remove the query string; decode; and normalize the URL. It may
+             * contain literal '%', '?' and/or ';' characters at this point.
+             *
+             * The re-write rules need to be able to process URLs with literal '?' characters and add query strings
+             * without the two becoming confused. The re-write rules also need to be able to insert literal '%'
+             * characters without them being confused with %nn encoding.
+             *
+             * The re-write rules cannot insert path parameters.
+             *
+             * To meet these requirement, the URL is processed as follows.
+             *
+             * Step 1. The URL is partially re-encoded by encodeForRewrite(). This method encodes any literal '%', ';'
+             * and/or '?' characters in the URL using the standard %nn form.
+             *
+             * Step 2. The re-write processing runs with the provided re-write rules against the partially encoded URL.
+             * If a re-write rule needs to insert a literal '%', ';' or '?', it must do so in %nn encoded form.
+             *
+             * Step 3. The URL (and query string if present) is re-encoded using the re-write specific encoders
+             * (REWRITE_DEFAULT_ENCODER and REWRITE_QUERY_ENCODER) that behave the same was as the standard encoders
+             * apart from '%' being treated as a safe character. This prevents double encoding of any '%' characters
+             * present in the URL from steps 1 or 2.
+             */
+
+            // Step 1. Encode URL for processing by the re-write rules.
+            CharSequence urlRewriteEncoded = encodeForRewrite(urlDecoded);
             CharSequence host = request.getServerName();
             boolean rewritten = false;
             boolean done = false;
             boolean qsa = false;
             boolean qsd = false;
             boolean valveSkip = false;
+
+            // Step 2. Process the URL using the re-write rules.
             for (int i = 0; i < rules.length; i++) {
                 RewriteRule rule = rules[i];
-                CharSequence test = (rule.isHost()) ? host : urlDecoded;
+                CharSequence test = (rule.isHost()) ? host : urlRewriteEncoded;
                 CharSequence newtest = rule.evaluate(test, resolver);
                 if (newtest != null && !test.toString().equals(newtest.toString())) {
                     if (containerLog.isTraceEnabled()) {
@@ -323,7 +371,7 @@ public class RewriteValve extends ValveBase {
                     if (rule.isHost()) {
                         host = newtest;
                     } else {
-                        urlDecoded = newtest;
+                        urlRewriteEncoded = newtest;
                     }
                     rewritten = true;
                 }
@@ -360,28 +408,29 @@ public class RewriteValve extends ValveBase {
                 if (rule.isRedirect() && newtest != null) {
                     // Append the query string to the url if there is one and it
                     // hasn't been rewritten
-                    String urlStringDecoded = urlDecoded.toString();
-                    int index = urlStringDecoded.indexOf('?');
-                    String rewrittenQueryStringDecoded;
+                    String urlStringRewriteEncoded = urlRewriteEncoded.toString();
+                    int index = urlStringRewriteEncoded.indexOf('?');
+                    String rewrittenQueryStringRewriteEncoded;
                     if (index == -1) {
-                        rewrittenQueryStringDecoded = null;
+                        rewrittenQueryStringRewriteEncoded = null;
                     } else {
-                        rewrittenQueryStringDecoded = urlStringDecoded.substring(index + 1);
-                        urlStringDecoded = urlStringDecoded.substring(0, index);
+                        rewrittenQueryStringRewriteEncoded = urlStringRewriteEncoded.substring(index + 1);
+                        urlStringRewriteEncoded = urlStringRewriteEncoded.substring(0, index);
                     }
 
+                    // Step 3. Complete the 2nd stage to encoding.
                     StringBuilder urlStringEncoded =
-                            new StringBuilder(URLEncoder.DEFAULT.encode(urlStringDecoded, uriCharset));
+                            new StringBuilder(REWRITE_DEFAULT_ENCODER.encode(urlStringRewriteEncoded, uriCharset));
                     if (!qsd && queryStringOriginalEncoded != null && queryStringOriginalEncoded.length() > 0) {
-                        if (rewrittenQueryStringDecoded == null) {
+                        if (rewrittenQueryStringRewriteEncoded == null) {
                             urlStringEncoded.append('?');
                             urlStringEncoded.append(queryStringOriginalEncoded);
                         } else {
                             if (qsa) {
                                 // if qsa is specified append the query
                                 urlStringEncoded.append('?');
-                                urlStringEncoded
-                                        .append(URLEncoder.QUERY.encode(rewrittenQueryStringDecoded, uriCharset));
+                                urlStringEncoded.append(
+                                        REWRITE_QUERY_ENCODER.encode(rewrittenQueryStringRewriteEncoded, uriCharset));
                                 urlStringEncoded.append('&');
                                 urlStringEncoded.append(queryStringOriginalEncoded);
                             } else if (index == urlStringEncoded.length() - 1) {
@@ -390,13 +439,14 @@ public class RewriteValve extends ValveBase {
                                 urlStringEncoded.deleteCharAt(index);
                             } else {
                                 urlStringEncoded.append('?');
-                                urlStringEncoded
-                                        .append(URLEncoder.QUERY.encode(rewrittenQueryStringDecoded, uriCharset));
+                                urlStringEncoded.append(
+                                        REWRITE_QUERY_ENCODER.encode(rewrittenQueryStringRewriteEncoded, uriCharset));
                             }
                         }
-                    } else if (rewrittenQueryStringDecoded != null) {
+                    } else if (rewrittenQueryStringRewriteEncoded != null) {
                         urlStringEncoded.append('?');
-                        urlStringEncoded.append(URLEncoder.QUERY.encode(rewrittenQueryStringDecoded, uriCharset));
+                        urlStringEncoded
+                                .append(REWRITE_QUERY_ENCODER.encode(rewrittenQueryStringRewriteEncoded, uriCharset));
                     }
 
                     // Insert the context if
@@ -473,13 +523,16 @@ public class RewriteValve extends ValveBase {
             if (rewritten) {
                 if (!done) {
                     // See if we need to replace the query string
-                    String urlStringDecoded = urlDecoded.toString();
-                    String queryStringDecoded = null;
-                    int queryIndex = urlStringDecoded.indexOf('?');
+                    String urlStringRewriteEncoded = urlRewriteEncoded.toString();
+                    String queryStringRewriteEncoded = null;
+                    int queryIndex = urlStringRewriteEncoded.indexOf('?');
                     if (queryIndex != -1) {
-                        queryStringDecoded = urlStringDecoded.substring(queryIndex + 1);
-                        urlStringDecoded = urlStringDecoded.substring(0, queryIndex);
+                        queryStringRewriteEncoded = urlStringRewriteEncoded.substring(queryIndex + 1);
+                        urlStringRewriteEncoded = urlStringRewriteEncoded.substring(0, queryIndex);
                     }
+                    // Parse path parameters from rewrite production and populate request path parameters
+                    urlStringRewriteEncoded =
+                            org.apache.catalina.util.RequestUtil.stripPathParams(urlStringRewriteEncoded, request);
                     // Save the current context path before re-writing starts
                     String contextPath = null;
                     if (context) {
@@ -492,10 +545,12 @@ public class RewriteValve extends ValveBase {
                         // This is neither decoded nor normalized
                         chunk.append(contextPath);
                     }
-                    chunk.append(URLEncoder.DEFAULT.encode(urlStringDecoded, uriCharset));
+
+                    // Step 3. Complete the 2nd stage to encoding.
+                    chunk.append(REWRITE_DEFAULT_ENCODER.encode(urlStringRewriteEncoded, uriCharset));
                     // Rewriting may have denormalized the URL and added encoded characters
                     // Decode then normalize
-                    String urlStringRewriteDecoded = URLDecoder.decode(urlStringDecoded, uriCharset);
+                    String urlStringRewriteDecoded = URLDecoder.decode(urlStringRewriteEncoded, uriCharset);
                     urlStringRewriteDecoded = RequestUtil.normalize(urlStringRewriteDecoded);
                     if (urlStringRewriteDecoded == null) {
                         // Assume bad input caused the re-write to try and escape root
@@ -511,7 +566,7 @@ public class RewriteValve extends ValveBase {
                     }
                     chunk.append(urlStringRewriteDecoded);
                     // Set the new Query String
-                    if (queryStringDecoded == null) {
+                    if (queryStringRewriteEncoded == null) {
                          // No new query string. Therefore the original is retained unless QSD is defined.
                         if (qsd) {
                             request.getCoyoteRequest().queryString().setChars(MessageBytes.EMPTY_CHAR_ARRAY, 0, 0);
@@ -520,7 +575,7 @@ public class RewriteValve extends ValveBase {
                         // New query string. Therefore the original is dropped unless QSA is defined (and QSD is not).
                         request.getCoyoteRequest().queryString().setChars(MessageBytes.EMPTY_CHAR_ARRAY, 0, 0);
                         chunk = request.getCoyoteRequest().queryString().getCharChunk();
-                        chunk.append(URLEncoder.QUERY.encode(queryStringDecoded, uriCharset));
+                        chunk.append(REWRITE_QUERY_ENCODER.encode(queryStringRewriteEncoded, uriCharset));
                         if (qsa && queryStringOriginalEncoded != null && queryStringOriginalEncoded.length() > 0) {
                             chunk.append('&');
                             chunk.append(queryStringOriginalEncoded);
@@ -818,6 +873,33 @@ public class RewriteValve extends ValveBase {
             rule.setValveSkip(true);
         } else {
             throw new IllegalArgumentException(sm.getString("rewriteValve.invalidFlags", line, flag));
+        }
+    }
+
+
+    private CharSequence encodeForRewrite(CharSequence input) {
+        StringBuilder result = null;
+        int pos = 0;
+        int mark = 0;
+        while (pos < input.length()) {
+            char c = input.charAt(pos);
+            if (c == '%' || c == ';' || c == '?') {
+                if (result == null) {
+                    result = new StringBuilder((int) (input.length() * 1.1));
+                }
+                result.append(input.subSequence(mark, pos));
+                result.append('%');
+                result.append(Character.forDigit((c >> 4) & 0xF, 16));
+                result.append(Character.forDigit(c & 0xF, 16));
+                mark = pos + 1;
+            }
+            pos++;
+        }
+        if (result != null) {
+            result.append(input.subSequence(mark, input.length()));
+            return result;
+        } else {
+            return input;
         }
     }
 }
