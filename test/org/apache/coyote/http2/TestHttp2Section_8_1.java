@@ -531,4 +531,20 @@ public class TestHttp2Section_8_1 extends Http2TestBase {
 
         doInvalidPseudoHeaderTest(headers, "0-Goaway-[3]-[1]-");
     }
+
+
+    @Test
+    public void testAuthorityHeaderMissing() throws Exception {
+        // Every HTTP/2 request must provide an authority, either via the
+        // ":authority" pseudo header or a "host" header. A request that
+        // provides neither must be rejected.
+        http2Connect();
+
+        List<Header> headers = new ArrayList<>(3);
+        headers.add(new Header(":method", "GET"));
+        headers.add(new Header(":scheme", "http"));
+        headers.add(new Header(":path", "/simple"));
+
+        doInvalidPseudoHeaderTest(headers, "0-Goaway-[3]-[1]-");
+    }
 }
