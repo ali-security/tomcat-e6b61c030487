@@ -247,6 +247,12 @@ public class TestOpenSSLEngineOcsp {
         ocspResponder.createContext("/invalid", exchange -> respond(exchange, 200,
                 "This is not an OCSP response".getBytes(StandardCharsets.ISO_8859_1)));
         ocspResponder.createContext("/large", exchange -> respond(exchange, 200, new byte[200 * 1024]));
+        // OCSPResponse with responseStatus tryLater (3) and no responseBytes
+        ocspResponder.createContext("/try-later", exchange -> respond(exchange, 200,
+                new byte[] { 0x30, 0x03, 0x0a, 0x01, 0x03 }));
+        // OCSPResponse with responseStatus unauthorized (6) and no responseBytes
+        ocspResponder.createContext("/unauthorized", exchange -> respond(exchange, 200,
+                new byte[] { 0x30, 0x03, 0x0a, 0x01, 0x06 }));
         ocspResponder.createContext("/slow", exchange -> {
             try {
                 Thread.sleep(SLOW_RESPONDER_DELAY);
@@ -260,6 +266,8 @@ public class TestOpenSSLEngineOcsp {
                 new ResponseSpec(V_OCSP_CERTSTATUS_GOOD, caCert, caKey)));
         ocspResponder.createContext("/revoked", exchange -> respondOcsp(exchange,
                 new ResponseSpec(V_OCSP_CERTSTATUS_REVOKED, caCert, caKey)));
+        ocspResponder.createContext("/unknown", exchange -> respondOcsp(exchange,
+                new ResponseSpec(V_OCSP_CERTSTATUS_UNKNOWN, caCert, caKey)));
         // Forged, replayed and stale responses
         ocspResponder.createContext("/signed-by-rogue-ca", exchange -> respondOcsp(exchange,
                 new ResponseSpec(V_OCSP_CERTSTATUS_GOOD, rogueCaCert, rogueCaKey)));
@@ -364,7 +372,19 @@ public class TestOpenSSLEngineOcsp {
 
     @Test
     public void testResponderResponseTooLarge() throws Throwable {
-        doTestOcspFailure(responderUrl("/large"), X509_V_ERR_UNABLE_TO_GET_CRL);
+        doTestOcspFailure(responderUrl("/large"), X509_V_ERR_OCSP_RESP_INVALID);
+    }
+
+
+    @Test
+    public void testResponderTryLater() throws Throwable {
+        doTestOcspFailure(responderUrl("/try-later"), X509_V_ERR_UNABLE_TO_GET_CRL);
+    }
+
+
+    @Test
+    public void testResponderUnauthorized() throws Throwable {
+        doTestOcspFailure(responderUrl("/unauthorized"), X509_V_ERR_APPLICATION_VERIFICATION);
     }
 
 
@@ -431,6 +451,13 @@ public class TestOpenSSLEngineOcsp {
 
 
     @Test
+    public void testResponseUnknown() throws Throwable {
+        // A valid, signed response that reports the certificate status as unknown
+        doTestSignedOcspFailure("/unknown", X509_V_ERR_APPLICATION_VERIFICATION);
+    }
+
+
+    @Test
     public void testResponseSignedByUntrustedResponder() throws Throwable {
         // Forged response claiming the certificate is good, signed by a CA that is not trusted
         doTestSignedOcspFailure("/signed-by-rogue-ca", X509_V_ERR_OCSP_SIGNATURE_FAILURE);
@@ -488,10 +515,9 @@ public class TestOpenSSLEngineOcsp {
 
         /*
          * The verification context has no current certificate so the OCSP
-         * processing in the callback returns V_OCSP_CERTSTATUS_UNKNOWN and
-         * leaves the error set by processOCSPRequest() above unchanged. This is
-         * the state the callback sees after a failed OCSP request. The
-         * certificate must be rejected.
+         * processing in the callback returns V_OCSP_CERTSTATUS_UNKNOWN with
+         * X509_V_ERR_UNABLE_TO_GET_CRL set. This is the state the callback sees
+         * after a failed OCSP request. The certificate must be rejected.
          */
         Assert.assertEquals("Client certificate accepted although the OCSP check failed", 0, verify());
     }
