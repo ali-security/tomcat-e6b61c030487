@@ -378,6 +378,9 @@
       <add>
         Improvements to Japanese translations by tak7iji. (markt)
       </add>
+       <add>
+        Add escaping to log formatters to align with JSON formatter. (markt)
+      </add>
     </changelog>
   </subsection>
 </section>
