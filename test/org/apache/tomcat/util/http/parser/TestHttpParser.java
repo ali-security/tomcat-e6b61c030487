@@ -186,4 +186,59 @@ public class TestHttpParser {
     public void testTokenStringValid() {
         Assert.assertTrue(HttpParser.isToken("token"));
     }
+
+
+    @Test
+    public void testFieldVCharFullRange() {
+        for (int i = 0; i < 256; i++) {
+            // RFC 9110: field-vchar = VCHAR / obs-text, VCHAR = %x21-7E, obs-text = %x80-FF
+            boolean expected = i >= 0x21 && i <= 0x7E || i >= 0x80 && i <= 0xFF;
+            Assert.assertEquals("Character [" + i + "]", Boolean.valueOf(expected),
+                    Boolean.valueOf(HttpParser.isFieldVChar(i)));
+        }
+    }
+
+
+    @Test
+    public void testFieldContentFullRange() {
+        for (int i = 0; i < 256; i++) {
+            // RFC 9110: field-content characters are field-vchar plus SP and HTAB (only between field-vchars)
+            boolean expected = i >= 0x21 && i <= 0x7E || i >= 0x80 && i <= 0xFF || i == ' ' || i == '\t';
+            Assert.assertEquals("Character [" + i + "]", Boolean.valueOf(expected),
+                    Boolean.valueOf(HttpParser.isFieldContent(i)));
+        }
+    }
+
+
+    @Test
+    public void testFieldVCharOutOfRange() {
+        Assert.assertFalse(HttpParser.isFieldVChar(-1));
+        Assert.assertFalse(HttpParser.isFieldVChar(256));
+        // Sign extended byte 0xE9
+        Assert.assertFalse(HttpParser.isFieldVChar(0xFFE9));
+        Assert.assertFalse(HttpParser.isFieldVChar(Integer.MAX_VALUE));
+        Assert.assertFalse(HttpParser.isFieldContent(-1));
+        Assert.assertFalse(HttpParser.isFieldContent(256));
+        Assert.assertFalse(HttpParser.isFieldContent(0xFFE9));
+        Assert.assertFalse(HttpParser.isFieldContent(Integer.MAX_VALUE));
+    }
+
+
+    @Test
+    public void testNonAsciiNotToken() {
+        for (int i = 128; i < 256; i++) {
+            Assert.assertFalse("Character [" + i + "]", HttpParser.isToken(i));
+        }
+    }
+
+
+    @Test
+    public void testNonAsciiNotRequestTarget() {
+        HttpParser httpParser = new HttpParser(null, null);
+        for (int i = 128; i < 256; i++) {
+            Assert.assertTrue("Character [" + i + "]", httpParser.isNotRequestTargetRelaxed(i));
+            Assert.assertFalse("Character [" + i + "]", httpParser.isAbsolutePathRelaxed(i));
+            Assert.assertFalse("Character [" + i + "]", httpParser.isQueryRelaxed(i));
+        }
+    }
 }

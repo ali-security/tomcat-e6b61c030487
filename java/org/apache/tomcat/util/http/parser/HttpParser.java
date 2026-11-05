@@ -33,7 +33,7 @@ public class HttpParser {
 
     private static final StringManager sm = StringManager.getManager(HttpParser.class);
 
-    private static final int ARRAY_SIZE = 128;
+    private static final int ARRAY_SIZE = 256;
 
     private static final boolean[] IS_CONTROL = new boolean[ARRAY_SIZE];
     private static final boolean[] IS_SEPARATOR = new boolean[ARRAY_SIZE];
@@ -47,6 +47,8 @@ public class HttpParser {
     private static final boolean[] IS_SUBDELIM = new boolean[ARRAY_SIZE];
     private static final boolean[] IS_USERINFO = new boolean[ARRAY_SIZE];
     private static final boolean[] IS_RELAXABLE = new boolean[ARRAY_SIZE];
+    private static final boolean[] IS_FIELD_VCHAR = new boolean[ARRAY_SIZE];
+    private static final boolean[] IS_FIELD_CONTENT = new boolean[ARRAY_SIZE];
 
     private static final HttpParser DEFAULT;
 
@@ -114,6 +116,16 @@ public class HttpParser {
                     i == '{' || i == '|' || i == '}') {
                 IS_RELAXABLE[i] = true;
             }
+
+            // field-vchar is VCHAR / obs-text
+            if (i > 32 && i < 127 || i > 127) {
+                IS_FIELD_VCHAR[i] = true;
+            }
+
+            // field-content  = field-vchar [ 1*( SP / HTAB / field-vchar ) field-vchar ]
+            if (IS_FIELD_VCHAR[i] || i == '\t' || i == ' ') {
+                IS_FIELD_CONTENT[i] = true;
+            }
         }
 
         DEFAULT = new HttpParser(null, null);
@@ -130,8 +142,8 @@ public class HttpParser {
             // Not valid for request target.
             // Combination of multiple rules from RFC7230 and RFC 3986. Must be
             // ASCII, no controls plus a few additional characters excluded
-            if (IS_CONTROL[i] || i == ' ' || i == '\"' || i == '#' || i == '<' || i == '>' || i == '\\' || i == '^' ||
-                    i == '`' || i == '{' || i == '|' || i == '}') {
+            if (IS_CONTROL[i] || i > 127 || i == ' ' || i == '\"' || i == '#' || i == '<' || i == '>' || i == '\\' ||
+                    i == '^' || i == '`' || i == '{' || i == '|' || i == '}') {
                 IS_NOT_REQUEST_TARGET[i] = true;
             }
 
@@ -398,6 +410,26 @@ public class HttpParser {
         // ones
         try {
             return IS_CONTROL[c];
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            return false;
+        }
+    }
+
+
+    public static boolean isFieldVChar(int c) {
+        // Fast for valid field-vchar characters, slower for some incorrect ones
+        try {
+            return IS_FIELD_VCHAR[c];
+        } catch (ArrayIndexOutOfBoundsException ex) {
+            return false;
+        }
+    }
+
+
+    public static boolean isFieldContent(int c) {
+        // Fast for valid field-content characters, slower for some incorrect ones
+        try {
+            return IS_FIELD_CONTENT[c];
         } catch (ArrayIndexOutOfBoundsException ex) {
             return false;
         }

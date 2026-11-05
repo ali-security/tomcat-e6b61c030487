@@ -113,6 +113,20 @@ public class TestHpack {
         }
     }
 
+    @Test
+    public void testHeaderValueLiteralFullRange() throws Exception {
+        for (int i = 0; i < 256; i++) {
+            // Literal Header Field without Indexing - New Name. Neither the name nor the value is Huffman encoded.
+            ByteBuffer input = ByteBuffer.wrap(new byte[] { 0x00, 0x01, 'x', 0x01, (byte) i });
+            MimeHeaders headers = new MimeHeaders();
+            HpackDecoder decoder = new HpackDecoder();
+            decoder.setHeaderEmitter(new HeadersListener(headers));
+            decoder.decode(input);
+            Assert.assertEquals("Character [" + i + "]", Character.toString((char) i), headers.getHeader("x"));
+        }
+    }
+
+
     @Test(expected = HpackException.class)
     public void testExcessiveStringLiteralPadding() throws Exception {
         MimeHeaders headers = new MimeHeaders();

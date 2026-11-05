@@ -222,7 +222,7 @@ public class HpackDecoder {
         }
         StringBuilder stringBuilder = new StringBuilder(length);
         for (int i = 0; i < length; ++i) {
-            stringBuilder.append((char) buffer.get());
+            stringBuilder.append((char) (buffer.get() & 0xFF));
         }
         return stringBuilder.toString();
     }
