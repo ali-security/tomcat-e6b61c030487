@@ -17,6 +17,7 @@
 package org.apache.catalina.connector;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -36,6 +37,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 
+import jakarta.servlet.MultipartConfigElement;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
@@ -45,6 +47,7 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import org.apache.catalina.Context;
+import org.apache.catalina.Wrapper;
 import org.apache.catalina.authenticator.BasicAuthenticator;
 import org.apache.catalina.filters.FailedRequestFilter;
 import org.apache.catalina.startup.SimpleHttpClient;
@@ -961,6 +964,106 @@ public class TestRequest extends TomcatBaseTest {
                 throws ServletException, IOException {
             // Container will handle any errors
             req.getReader();
+        }
+    }
+
+
+    /*
+     * Temporary copies of uploaded parts must be deleted as soon as multi-part
+     * processing is known to have failed. Parts that have been parsed (and
+     * hence written to disk) but not yet wrapped in an ApplicationPart are not
+     * visible to Request.recycle() so, before this was fixed, they were left in
+     * the work directory until GC got around to them. A client able to trigger
+     * the failure repeatedly could fill the file system.
+     */
+    @Test
+    public void testMultipartTempFileCleanUpOnFailure() throws Exception {
+
+        Tomcat tomcat = getTomcatInstance();
+
+        File uploadDir = new File(getTemporaryDirectory(), "test-part-clean-up");
+        Assert.assertTrue(uploadDir.mkdirs());
+        addDeleteOnTearDown(uploadDir);
+
+        // No file system docBase required
+        Context ctx = tomcat.addContext("", null);
+
+        Wrapper w = Tomcat.addServlet(ctx, "partCleanUp", new PartCleanUpServlet(uploadDir));
+        /*
+         * Tomcat.addServlet() does not process annotations so the multi-part
+         * configuration has to be set explicitly. The file size threshold of
+         * one byte ensures that every part is written to disk.
+         */
+        w.setMultipartConfigElement(new MultipartConfigElement(uploadDir.getAbsolutePath(), -1, -1, 1));
+        ctx.addServletMappingDecoded("/", "partCleanUp");
+
+        /*
+         * All of the parts are parsed - and therefore written to disk - before
+         * this limit is applied to the first part. That is what leaves the
+         * remaining parts behind.
+         */
+        tomcat.getConnector().setMaxPostSize(16);
+
+        tomcat.start();
+
+        StringBuilder body = new StringBuilder();
+        for (int i = 0; i < 3; i++) {
+            body.append("--").append(PART_CLEAN_UP_BOUNDARY).append("\r\n");
+            body.append("Content-Disposition: form-data; name=\"part").append(i).append("\"\r\n");
+            body.append("\r\n");
+            for (int j = 0; j < 128; j++) {
+                body.append('X');
+            }
+            body.append("\r\n");
+        }
+        body.append("--").append(PART_CLEAN_UP_BOUNDARY).append("--\r\n");
+
+        Map<String,List<String>> reqHeaders = new HashMap<>();
+        reqHeaders.put("Content-Type",
+                Arrays.asList("multipart/form-data; boundary=" + PART_CLEAN_UP_BOUNDARY));
+
+        ByteChunk out = new ByteChunk();
+        int rc = postUrl(body.toString().getBytes(StandardCharsets.ISO_8859_1),
+                "http://localhost:" + getPort() + "/", out, reqHeaders, null);
+
+        Assert.assertEquals(HttpServletResponse.SC_OK, rc);
+        /*
+         * The servlet reports the exception it saw plus the number of temporary
+         * files still present once multi-part processing has failed.
+         */
+        Assert.assertEquals("IllegalStateException-0", out.toString());
+    }
+
+
+    private static final String PART_CLEAN_UP_BOUNDARY = "--simpleboundary";
+
+
+    private static class PartCleanUpServlet extends HttpServlet {
+
+        private static final long serialVersionUID = 1L;
+
+        private final File uploadDir;
+
+        PartCleanUpServlet(File uploadDir) {
+            this.uploadDir = uploadDir;
+        }
+
+        @Override
+        protected void doPost(HttpServletRequest req, HttpServletResponse resp)
+                throws ServletException, IOException {
+            String failure = "none";
+            try {
+                req.getParts();
+            } catch (IllegalStateException e) {
+                failure = "IllegalStateException";
+            }
+
+            File[] leftOver = uploadDir.listFiles();
+            int count = leftOver == null ? -1 : leftOver.length;
+
+            resp.setContentType("text/plain");
+            resp.setCharacterEncoding("UTF-8");
+            resp.getWriter().print(failure + "-" + count);
         }
     }
 }
