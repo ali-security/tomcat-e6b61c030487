@@ -313,6 +313,46 @@ public class TestHttp2Section_5_1 extends Http2TestBase {
     }
 
 
+    /*
+     * The initial MAX_CONCURRENT_STREAMS limit has to be applied as soon as the SETTINGS frame is sent. If the limit
+     * is only applied once the client ACKs that SETTINGS frame then a client that never sends the ACK is able to open
+     * an unlimited number of concurrent streams.
+     *
+     * Note: unlike the other tests in this class, no frame is read from the server until after the additional streams
+     * have been sent because the test client ACKs the SETTINGS frame as soon as it reads it.
+     */
+    @Test
+    public void testExceedMaxActiveStreamsBeforeSettingsAck() throws Exception {
+        // http2Connect() - modified
+        enableHttp2(1);
+        configureAndStartWebApplication();
+        openClientConnection();
+        doHttpUpgrade();
+        sendClientPreface();
+
+        // Deliberately no reads at this point so the server does not receive a SETTINGS ACK
+        sendLargeGetRequest(3);
+        sendSimpleGetRequest(5);
+
+        /*
+         * Any RST_STREAM triggered by the HEADERS frames above is written by the thread that reads those frames so it
+         * is written before the ACK for the PING frame below.
+         */
+        sendPing(0, false, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 });
+
+        String refused = "-RST-[" + Http2Error.REFUSED_STREAM.getCode() + "]";
+        for (int i = 0; i < 64; i++) {
+            String trace = output.getTrace();
+            if (trace.contains(refused) || trace.contains("0-Ping-Ack-[") || trace.contains("0-Goaway-")) {
+                break;
+            }
+            parser.readFrame();
+        }
+
+        Assert.assertTrue(output.getTrace(), output.getTrace().contains(refused));
+    }
+
+
     @Test
     public void testErrorOnWaitingStream01() throws Exception {
         LogManager.getLogManager().getLogger("org.apache.coyote.http2").setLevel(Level.ALL);
