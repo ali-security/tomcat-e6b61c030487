@@ -40,6 +40,26 @@ import org.xml.sax.InputSource;
 
 public class TestWebdavServlet extends TomcatBaseTest {
 
+    private static final String CRLF = SimpleHttpClient.CRLF;
+
+    private static final String LOCK_BODY = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>" + CRLF +
+                                            "<D:lockinfo xmlns:D='DAV:'>" + CRLF +
+                                            "  <D:lockscope><D:exclusive/></D:lockscope>" + CRLF +
+                                            "  <D:locktype><D:write/></D:locktype>" + CRLF +
+                                            "  <D:owner>" + CRLF +
+                                            "    <D:href>http://www.apache.org</D:href>" + CRLF +
+                                            "  </D:owner>" + CRLF +
+                                            "</D:lockinfo>";
+
+    private static final String PROPFIND_PROP = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>" + CRLF +
+                                                "<D:propfind xmlns:D='DAV:'>" + CRLF +
+                                                "  <D:prop>" + CRLF +
+                                                "    <D:getcontentlength/>" + CRLF +
+                                                "    <D:getlastmodified/>" + CRLF +
+                                                "  </D:prop>" + CRLF +
+                                                "</D:propfind>";
+
+
     /*
      * Test attempting to access special paths (WEB-INF/META-INF) using WebdavServlet
      */
@@ -188,11 +208,135 @@ public class TestWebdavServlet extends TomcatBaseTest {
     }
 
 
+    /*
+     * Only tests LOCK bodies exceeding limit. Other tests cover valid LOCK bodies.
+     */
+    @Test
+    public void testLockBodyLimit() throws Exception {
+        doTestLimit("LOCK", "/", LOCK_BODY, true, true);
+    }
+
+
+    /*
+     * As above but using chunked encoding so no content length is available and the limit has to be enforced while the
+     * request body is being read.
+     */
+    @Test
+    public void testLockBodyLimitChunked() throws Exception {
+        doTestLimit("LOCK", "/", LOCK_BODY, false, true);
+    }
+
+
+    /*
+     * Only tests PROPFIND bodies exceeding limit. Other tests cover valid PROPFIND bodies.
+     */
+    @Test
+    public void testPropFindBodyLimit() throws Exception {
+        doTestLimit("PROPFIND", "/", PROPFIND_PROP, true, true);
+    }
+
+
+    /*
+     * As above but using chunked encoding so no content length is available and the limit has to be enforced while the
+     * request body is being read.
+     */
+    @Test
+    public void testPropFindBodyLimitChunked() throws Exception {
+        doTestLimit("PROPFIND", "/", PROPFIND_PROP, false, true);
+    }
+
+
+    /*
+     * Only tests MKCOL bodies exceeding limit. A MKCOL request body is only read when the client provides a content
+     * length so the chunked case is not tested.
+     */
+    @Test
+    public void testMkColBodyLimit() throws Exception {
+        doTestLimit("MKCOL", "/newcollection/", PROPFIND_PROP, true, false);
+    }
+
+
+    private void doTestLimit(String method, String path, String requestBody, boolean testContentLength,
+            boolean testChunked) throws Exception {
+
+        Tomcat tomcat = getTomcatInstance();
+
+        File appDir = new File("test/webapp");
+        Context ctxt = tomcat.addContext("", appDir.getAbsolutePath());
+
+        Wrapper webdavServlet = Tomcat.addServlet(ctxt, "webdav", new WebdavServlet());
+        webdavServlet.addInitParameter("listings", "true");
+        webdavServlet.addInitParameter("secret", "foo");
+        webdavServlet.addInitParameter("readonly", "false");
+        webdavServlet.addInitParameter("maxRequestBodySize", "10");
+
+        ctxt.addServletMappingDecoded("/*", "webdav");
+        tomcat.start();
+
+        if (testContentLength) {
+            // With content length
+            Client client = new Client();
+            client.setPort(getPort());
+
+            // @formatter:off
+            client.setRequest(new String[] {
+                    method + " " + path + " HTTP/1.1" + CRLF +
+                        "Host: localhost:" + getPort() + CRLF +
+                        "Content-Length: " + requestBody.length() + CRLF +
+                        "Connection: Close" + CRLF +
+                        CRLF +
+                        requestBody
+                    });
+            // @formatter:on
+            client.connect();
+            client.processRequest(true);
+            Assert.assertEquals("With content length: " + client.getResponseLine(),
+                    WebdavStatus.SC_REQUEST_TOO_LONG, client.getStatusCode());
+            client.disconnect();
+        }
+
+        if (testChunked) {
+            // Without content length
+            Client client = new Client();
+            client.setPort(getPort());
+
+            // @formatter:off
+            client.setRequest(new String[] {
+                    method + " " + path + " HTTP/1.1" + CRLF +
+                        "Host: localhost:" + getPort() + CRLF +
+                        "Transfer-Encoding: chunked" + CRLF +
+                        "Connection: Close" + CRLF +
+                        CRLF +
+                        Integer.toHexString(requestBody.length()) + CRLF +
+                        requestBody + CRLF +
+                        "0" + CRLF +
+                        CRLF
+                    });
+            // @formatter:on
+            client.connect();
+            client.processRequest(true);
+            Assert.assertEquals("Without content length: " + client.getResponseLine(),
+                    WebdavStatus.SC_REQUEST_TOO_LONG, client.getStatusCode());
+            client.disconnect();
+        }
+    }
+
+
     private static final class Client extends SimpleHttpClient {
 
         @Override
         public boolean isResponseBodyOK() {
             return true;
+        }
+
+        /*
+         * SimpleHttpClient in this version does not expose the numeric status code.
+         */
+        public int getStatusCode() {
+            String responseLine = getResponseLine();
+            Assert.assertNotNull("No response line", responseLine);
+            // Response line format is "HTTP/1.1 nnn [reason phrase]"
+            return Integer.parseInt(responseLine.substring(9, 12));
         }
     }
 }
