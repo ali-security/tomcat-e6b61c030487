@@ -1935,6 +1935,7 @@ class Http2UpgradeHandler extends AbstractStream implements InternalHttpUpgradeH
         // Only replace the stream if it currently uses the full implementation.
         if (current instanceof Stream) {
             streams.put(original.getIdentifier(), replacement);
+            getHpackDecoder().compareAndSetHeaderEmitter((Stream) current, HEADER_SINK);
 
             int made;
             original.windowAllocationLock.lock();
