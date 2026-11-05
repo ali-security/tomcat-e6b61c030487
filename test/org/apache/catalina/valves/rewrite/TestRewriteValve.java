@@ -21,11 +21,15 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import jakarta.servlet.ServletContextEvent;
+import jakarta.servlet.ServletContextListener;
 import jakarta.servlet.ServletException;
+import jakarta.servlet.SessionTrackingMode;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServlet;
 import jakarta.servlet.http.HttpServletRequest;
@@ -1046,6 +1050,140 @@ public class TestRewriteValve extends TomcatBaseTest {
             } else {
                 pw.print("FAIL");
             }
+        }
+    }
+
+
+    /*
+     * The session information is resolved for the original request target. When the rewrite valve re-invokes the
+     * request, the target may be mapped to a different context - possibly one with a different session configuration.
+     * The session information from the original mapping must not be retained else an attacker provided session ID
+     * (e.g. one parsed from a path parameter by a context that permits URL based session tracking) is used for the
+     * victim's interaction with the re-mapped resource.
+     */
+    @Test
+    public void testSessionInfoNotRetainedOnRewrite() throws Exception {
+
+        Tomcat tomcat = getTomcatInstance();
+
+        // No file system docBase required
+        Context ctx = tomcat.addContext("redirect", null);
+
+        tomcat.getHost().getPipeline().addValve(new AttackerSessionIdValve());
+        RewriteValve rewriteValve = new RewriteValve();
+        tomcat.getHost().getPipeline().addValve(rewriteValve);
+
+        rewriteValve.setConfiguration("RewriteRule ^/source/(.*) /redirect/$1");
+
+        Tomcat.addServlet(ctx, "sessionTest", new SessionIdServlet());
+        ctx.addServletMappingDecoded("/", "sessionTest");
+
+        tomcat.start();
+
+        ByteChunk res = new ByteChunk();
+        int rc = methodUrl("http://localhost:" + getPort() + "/source/sessionTest", res, DEFAULT_CLIENT_TIMEOUT_MS,
+                null, null, "GET", false);
+
+        Assert.assertEquals(HttpServletResponse.SC_OK, rc);
+
+        res.setCharset(StandardCharsets.UTF_8);
+        // The attacker provided session ID must not be visible to the re-mapped resource
+        Assert.assertEquals("NONE", res.toString());
+    }
+
+
+    /*
+     * When URL based session tracking is in use, a redirect triggered by the rewrite valve has to be encoded with the
+     * current session ID so the client continues to use its own session rather than starting a new one.
+     */
+    @Test
+    public void testRedirectEncodedWithSessionId() throws Exception {
+
+        Tomcat tomcat = getTomcatInstance();
+
+        // No file system docBase required
+        Context ctx = tomcat.addContext("redirect", null);
+        ctx.addApplicationListener("org.apache.catalina.valves.rewrite.TestRewriteValve$UrlSessionTrackingConfig");
+
+        // Ensures a session exists before the rewrite valve processes the request
+        ctx.getPipeline().addValve(new SessionCreationValve());
+        RewriteValve rewriteValve = new RewriteValve();
+        ctx.getPipeline().addValve(rewriteValve);
+
+        rewriteValve.setConfiguration("RewriteRule ^/from/a$ /to/b [R]");
+
+        Tomcat.addServlet(ctx, "tester", new TesterServlet());
+        ctx.addServletMappingDecoded("/from/a", "tester");
+        ctx.addServletMappingDecoded("/to/b", "tester");
+
+        tomcat.start();
+
+        ByteChunk res = new ByteChunk();
+        Map<String, List<String>> resHead = new HashMap<>();
+        int rc = methodUrl("http://localhost:" + getPort() + "/redirect/from/a", res, DEFAULT_CLIENT_TIMEOUT_MS, null,
+                resHead, "GET", false);
+
+        Assert.assertEquals(302, rc);
+
+        List<String> sessionIds = resHead.get("X-Session-Id");
+        Assert.assertNotNull(sessionIds);
+        Assert.assertFalse(sessionIds.isEmpty());
+
+        List<String> locations = resHead.get("Location");
+        Assert.assertNotNull(locations);
+        Assert.assertFalse(locations.isEmpty());
+        Assert.assertEquals("/redirect/to/b;jsessionid=" + sessionIds.get(0), locations.get(0));
+    }
+
+
+    public static class AttackerSessionIdValve extends ValveBase {
+
+        static final String ATTACKER_SESSION_ID = "ATTACKERPROVIDEDSESSIONID";
+
+        @Override
+        public void invoke(Request request, Response response) throws IOException, ServletException {
+            // The rewrite valve re-invokes the request through this pipeline. Only the original request target is
+            // associated with the attacker provided session ID.
+            if (request.getAttribute("sessionIdSet") == null) {
+                request.setAttribute("sessionIdSet", Boolean.TRUE);
+                request.setRequestedSessionId(ATTACKER_SESSION_ID);
+                request.setRequestedSessionURL(true);
+            }
+            getNext().invoke(request, response);
+        }
+    }
+
+
+    public static class SessionIdServlet extends HttpServlet {
+
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+            resp.setContentType("text/plain");
+            resp.setCharacterEncoding("UTF-8");
+
+            String requestedSessionId = req.getRequestedSessionId();
+            resp.getWriter().print(requestedSessionId == null ? "NONE" : requestedSessionId);
+        }
+    }
+
+
+    public static class SessionCreationValve extends ValveBase {
+
+        @Override
+        public void invoke(Request request, Response response) throws IOException, ServletException {
+            response.setHeader("X-Session-Id", request.getSession(true).getId());
+            getNext().invoke(request, response);
+        }
+    }
+
+
+    public static class UrlSessionTrackingConfig implements ServletContextListener {
+
+        @Override
+        public void contextInitialized(ServletContextEvent sce) {
+            sce.getServletContext().setSessionTrackingModes(EnumSet.of(SessionTrackingMode.URL));
         }
     }
 }
