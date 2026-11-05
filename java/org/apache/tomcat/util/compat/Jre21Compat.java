@@ -79,4 +79,18 @@ public class Jre21Compat extends Jre19Compat {
             throw new UnsupportedOperationException(e);
         }
     }
+
+
+    @Override
+    public boolean isCanonCachesDisabled() {
+        // The cache has been removed in Java 21
+        return true;
+    }
+
+
+    @Override
+    public boolean disableCanonCaches() {
+        // The cache has been removed in Java 21
+        return true;
+    }
 }
