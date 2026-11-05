@@ -869,6 +869,108 @@ public class TestRequest extends TomcatBaseTest {
         }
     }
 
+    /*
+     * The number of locales in the Accept-Language header(s) is
+     * limited because the header value is untrusted input. Locales
+     * above the limit are ignored. The limit is configurable via the
+     * maxLocaleCount attribute of the Connector associated with the
+     * request.
+     */
+    @Test
+    public void testAcceptLanguageLocaleLimitConfigurable() throws Exception {
+        // Connector default of 10 permits exactly 10 locales
+        Assert.assertEquals(10, localeCount(new Connector(), buildAcceptLanguage(10)));
+
+        // Explicit limit is enforced
+        Connector connector = new Connector();
+        connector.setMaxLocaleCount(5);
+        Assert.assertEquals(5, localeCount(connector, buildAcceptLanguage(5)));
+
+        // Locales above the limit are ignored
+        Assert.assertEquals(5, localeCount(connector, buildAcceptLanguage(6)));
+
+        // No limit
+        connector = new Connector();
+        connector.setMaxLocaleCount(-1);
+        Assert.assertEquals(20, localeCount(connector, buildAcceptLanguage(20)));
+    }
+
+    private static String buildAcceptLanguage(int localeCount) {
+        StringBuilder acceptLanguage = new StringBuilder();
+        for (int i = 0; i < localeCount; i++) {
+            if (i > 0) {
+                acceptLanguage.append(',');
+            }
+            acceptLanguage.append(String.format("aa-%03d", Integer.valueOf(i)));
+        }
+        return acceptLanguage.toString();
+    }
+
+    private static int localeCount(Connector connector, String acceptLanguage) {
+        org.apache.coyote.Request coyoteRequest = new org.apache.coyote.Request();
+        coyoteRequest.getMimeHeaders().addValue("accept-language").setString(acceptLanguage);
+        Request request = new Request(connector);
+        request.setCoyoteRequest(coyoteRequest);
+
+        Enumeration<Locale> locales = request.getLocales();
+        int count = 0;
+        while (locales.hasMoreElements()) {
+            locales.nextElement();
+            count++;
+        }
+        return count;
+    }
+
+    /*
+     * The limit on untrusted locale tags is enforced while the
+     * header is parsed so that Locale objects are not created for
+     * entries that can never be used.
+     */
+    @Test
+    public void testAcceptLanguageLocaleLimitHeaderFlood() throws Exception {
+        Connector connector = new Connector();
+
+        // Default limit of 10. A header with far more tags than the
+        // limit is truncated to the limit.
+        Assert.assertEquals(10, localeCount(connector, buildAcceptLanguage(5000)));
+
+        // Exactly the limit is accepted.
+        Assert.assertEquals(10, localeCount(connector, buildAcceptLanguage(10)));
+    }
+
+    /*
+     * When multiple Accept-Language headers are present the limit
+     * applies to the combined set of locales and parsing stops
+     * early on the header in which the limit is exceeded.
+     */
+    @Test
+    public void testAcceptLanguageLocaleLimitMultipleHeaders() throws Exception {
+        // 5 + 5 = 10, within the default limit
+        Assert.assertEquals(10, localeCount(new Connector(), "aa-000,aa-001,aa-002,aa-003,aa-004",
+                "aa-005,aa-006,aa-007,aa-008,aa-009"));
+
+        // 5 + 6 = 11, exceeds the default limit so the last locale is ignored
+        Assert.assertEquals(10, localeCount(new Connector(), "aa-000,aa-001,aa-002,aa-003,aa-004",
+                "aa-005,aa-006,aa-007,aa-008,aa-009,aa-010"));
+    }
+
+    private static int localeCount(Connector connector, String... acceptLanguages) {
+        org.apache.coyote.Request coyoteRequest = new org.apache.coyote.Request();
+        for (String acceptLanguage : acceptLanguages) {
+            coyoteRequest.getMimeHeaders().addValue("accept-language").setString(acceptLanguage);
+        }
+        Request request = new Request(connector);
+        request.setCoyoteRequest(coyoteRequest);
+
+        Enumeration<Locale> locales = request.getLocales();
+        int count = 0;
+        while (locales.hasMoreElements()) {
+            locales.nextElement();
+            count++;
+        }
+        return count;
+    }
+
     @Test
     public void getLocaleMultipleHeaders01() throws Exception {
         TesterRequest req = new TesterRequest();
