@@ -16,6 +16,7 @@
  */
 package org.apache.tomcat.util.net.openssl;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -42,6 +43,7 @@ import org.apache.catalina.startup.Tomcat;
 import org.apache.catalina.startup.TomcatBaseTest;
 import org.apache.tomcat.jni.SSLContext;
 import org.apache.tomcat.util.net.SSLHostConfig;
+import org.apache.tomcat.util.net.SSLHostConfigCertificate;
 import org.apache.tomcat.util.net.TesterSupport;
 
 @RunWith(Parameterized.class)
@@ -179,6 +181,45 @@ public class TestOpenSSLConf extends TomcatBaseTest {
         for (String protocol : ENABLED_PROTOCOLS) {
             Assert.assertTrue("Protocol " + protocol + " is not enabled",
                     enabledProtocols.contains(protocol));
+        }
+    }
+
+    @Test
+    public void testOpenSSLConfCmdOcsp() throws Exception {
+        // The OCSP commands are handled natively by Tomcat Native for the APR/JNI implementation
+        Assume.assumeTrue("OCSP configuration is only checked for the FFM implementation",
+                "org.apache.tomcat.util.net.openssl.panama.OpenSSLImplementation".equals(sslImplementationName));
+        SSLHostConfig sslHostConfig = initOpenSSLConfCmd("OCSP_TIMEOUT", "5000", "OCSP_VERIFY_FLAGS", "16");
+
+        Set<SSLHostConfigCertificate> certificates = sslHostConfig.getCertificates();
+        Assert.assertEquals(1, certificates.size());
+        Object sslContext = certificates.iterator().next().getSslContext();
+        Assert.assertNotNull(sslContext);
+        Class<?> contextClass = Class.forName("org.apache.tomcat.util.net.openssl.panama.OpenSSLContext");
+        Assert.assertEquals(contextClass, sslContext.getClass());
+        Field ocspTimeout = contextClass.getDeclaredField("ocspTimeout");
+        ocspTimeout.setAccessible(true);
+        Assert.assertEquals(5000, ocspTimeout.getInt(sslContext));
+        Field ocspVerifyFlags = contextClass.getDeclaredField("ocspVerifyFlags");
+        ocspVerifyFlags.setAccessible(true);
+        Assert.assertEquals(16, ocspVerifyFlags.getInt(sslContext));
+
+        // The settings must be passed to the engines that perform the OCSP checks
+        Object engine = contextClass.getMethod("createSSLEngine").invoke(sslContext);
+        Class<?> engineClass = Class.forName("org.apache.tomcat.util.net.openssl.panama.OpenSSLEngine");
+        try {
+            Field state = engineClass.getDeclaredField("state");
+            state.setAccessible(true);
+            Object engineState = state.get(engine);
+            Class<?> engineStateClass = engineState.getClass();
+            Field engineOcspTimeout = engineStateClass.getDeclaredField("ocspTimeout");
+            engineOcspTimeout.setAccessible(true);
+            Assert.assertEquals(5000, engineOcspTimeout.getInt(engineState));
+            Field engineOcspVerifyFlags = engineStateClass.getDeclaredField("ocspVerifyFlags");
+            engineOcspVerifyFlags.setAccessible(true);
+            Assert.assertEquals(16, engineOcspVerifyFlags.getInt(engineState));
+        } finally {
+            engineClass.getMethod("shutdown").invoke(engine);
         }
     }
 

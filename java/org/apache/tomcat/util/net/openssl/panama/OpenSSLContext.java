@@ -129,6 +129,8 @@ public class OpenSSLContext implements org.apache.tomcat.util.net.SSLContext {
     private boolean initialized = false;
 
     private boolean noOcspCheck = false;
+    private int ocspTimeout = 15000;
+    private int ocspVerifyFlags = 0;
     private X509TrustManager x509TrustManager;
 
     private final ContextState state;
@@ -341,6 +343,10 @@ public class OpenSSLContext implements org.apache.tomcat.util.net.SSLContext {
             try (var localArena = Arena.ofConfined()) {
                 if (name.equals("NO_OCSP_CHECK")) {
                     rc = 1;
+                } else if (name.equals("OCSP_TIMEOUT")) {
+                    rc = 1;
+                } else if (name.equals("OCSP_VERIFY_FLAGS")) {
+                    rc = 1;
                 } else {
                     int code = SSL_CONF_cmd_value_type(state.confCtx, localArena.allocateFrom(name));
                     rc = 1;
@@ -412,6 +418,12 @@ public class OpenSSLContext implements org.apache.tomcat.util.net.SSLContext {
             try (var localArena = Arena.ofConfined()) {
                 if (name.equals("NO_OCSP_CHECK")) {
                     noOcspCheck = Boolean.parseBoolean(value);
+                    rc = 1;
+                } else if (name.equals("OCSP_TIMEOUT")) {
+                    ocspTimeout = Integer.parseInt(value);
+                    rc = 1;
+                } else if (name.equals("OCSP_VERIFY_FLAGS")) {
+                    ocspVerifyFlags = Integer.parseInt(value);
                     rc = 1;
                 } else {
                     rc = SSL_CONF_cmd(state.confCtx, localArena.allocateFrom(name),
@@ -1355,7 +1367,7 @@ public class OpenSSLContext implements org.apache.tomcat.util.net.SSLContext {
                 alpn, initialized,
                 sslHostConfig.getCertificateVerificationDepth(),
                 sslHostConfig.getCertificateVerification() == CertificateVerification.OPTIONAL_NO_CA,
-                noOcspCheck);
+                noOcspCheck, ocspTimeout, ocspVerifyFlags);
     }
 
     @Override
