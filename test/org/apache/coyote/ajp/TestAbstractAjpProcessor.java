@@ -550,6 +550,36 @@ public class TestAbstractAjpProcessor extends TomcatBaseTest {
         ajpClient.connect();
         validateCpong(ajpClient.cping());
 
+        // Shorter than the configured secret
+        forwardMessage = ajpClient.createForwardMessage();
+        forwardMessage.addAttribute(0x0C, "RIGHT");
+        forwardMessage.end();
+
+        responseHeaders = ajpClient.sendMessage(forwardMessage);
+        // Expect 3 packets: headers, body, end
+        validateResponseHeaders(responseHeaders, 403, "403");
+        responseBody = ajpClient.readMessage();
+        validateResponseBody(responseBody, expectedBody);
+        validateResponseEnd(ajpClient.readMessage(), false);
+
+        ajpClient.connect();
+        validateCpong(ajpClient.cping());
+
+        // Longer than the configured secret, which it also starts with
+        forwardMessage = ajpClient.createForwardMessage();
+        forwardMessage.addAttribute(0x0C, "RIGHTSECRETANDMORE");
+        forwardMessage.end();
+
+        responseHeaders = ajpClient.sendMessage(forwardMessage);
+        // Expect 3 packets: headers, body, end
+        validateResponseHeaders(responseHeaders, 403, "403");
+        responseBody = ajpClient.readMessage();
+        validateResponseBody(responseBody, expectedBody);
+        validateResponseEnd(ajpClient.readMessage(), false);
+
+        ajpClient.connect();
+        validateCpong(ajpClient.cping());
+
         forwardMessage = ajpClient.createForwardMessage();
         forwardMessage.addAttribute(0x0C, "RIGHTSECRET");
         forwardMessage.end();
